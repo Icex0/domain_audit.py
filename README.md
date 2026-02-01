@@ -4,11 +4,31 @@ Active Directory security auditing tool. Python port of `domain_audit.ps1`.
 
 ## Installation
 
+### With UV (Recommended)
+
 ```bash
-# Install system-wide with UV
+# Install UV if you don't have it (Linux & macOS)
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# For Windows
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+
+# Install domain-audit system-wide
+# Run this from the project root directory
 uv tool install --force .
 
-# Or use pip
+# Now you can run domain-audit from anywhere!
+domain-audit --help
+```
+
+### Alternative: With pip
+
+```bash
+# Create virtual environment
+python3 -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+
+# Install
 pip install .
 ```
 
