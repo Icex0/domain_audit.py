@@ -1,0 +1,30 @@
+[project]
+name = "domain-audit"
+version = "1.0.0"
+description = "Active Directory Domain Audit Tool"
+authors = [
+    { name = "0xJs" }
+]
+requires-python = ">=3.10"
+dependencies = [
+    "impacket>=0.11.0",
+    "ldap3>=2.9.1",
+    "rich>=13.0.0",
+    "typer>=0.9.0",
+]
+
+[project.scripts]
+domain-audit = "domain_audit.domain_audit:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel.force-include]
+"__init__.py" = "domain_audit/__init__.py"
+"domain_audit.py" = "domain_audit/domain_audit.py"
+"config.py" = "domain_audit/config.py"
+"core" = "domain_audit/core"
+"modules" = "domain_audit/modules"
+"utils" = "domain_audit/utils"
+"tools" = "domain_audit/tools"

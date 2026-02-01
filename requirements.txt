@@ -1,0 +1,9 @@
+# Domain Audit Python Tool - Requirements
+
+# Core dependencies
+impacket>=0.11.0
+ldap3>=2.9.1
+
+# CLI and UI
+rich>=13.0.0
+typer>=0.9.0
