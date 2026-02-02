@@ -10,6 +10,25 @@ from typing import Optional, List, Tuple
 from .logger import get_logger
 
 
+def check_certipy_available() -> bool:
+    """
+    Check if certipy is available on the system.
+    
+    Returns:
+        True if certipy is available, False otherwise
+    """
+    logger = get_logger()
+    
+    # Check for 'certipy' command
+    if shutil.which('certipy'):
+        logger.log_verbose("[+] certipy is available")
+        return True
+    
+    logger.error("[-] certipy is not installed or not in PATH")
+    logger.info("[*] Install with: pipx install certipy-ad")
+    return False
+
+
 def check_netexec_available() -> bool:
     """
     Check if netexec (nxc) is available on the system.

@@ -13,7 +13,7 @@ from .core.exceptions import DomainAuditError
 from .utils.logger import get_logger, set_verbose
 from .utils.output import create_output_directory, write_lines
 from .utils.ldap import LDAPConnection, LDAPConfig
-from .utils.dns import check_and_set_dns, reset_dns, is_admin, check_netexec_available
+from .utils.dependencies import check_and_set_dns, reset_dns, is_admin, check_netexec_available, check_certipy_available
 from .modules.enumeration import ADEnumerator
 from .modules.checks import SecurityChecker
 
@@ -77,6 +77,10 @@ def run(
     
     # Check if netexec is available
     if not check_netexec_available():
+        raise typer.Exit(1)
+    
+    # Check if certipy is available
+    if not check_certipy_available():
         raise typer.Exit(1)
     
     # Validate credentials
