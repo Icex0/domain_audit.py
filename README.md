@@ -1,12 +1,14 @@
 # Domain Audit
 
-Active Directory security auditing tool. Python port of `domain_audit.ps1`.
+Active Directory security auditing tool. Python port of [`domain_audit.ps1`](https://github.com/0xJs/domain_audit).
 
 ## Requirements
 
 - Python 3.10+
 - Network access to target Domain Controller
 - Valid AD credentials (password or NTLM hash)
+- **netexec** - Install with: `pipx install git+https://github.com/Pennyw0rth/NetExec`
+- **certipy** - Install with: `pipx install certipy-ad`
 
 ## Installation
 
@@ -120,6 +122,7 @@ domain-audit run -d contoso.com -dc 10.0.0.1 -u admin -p 'Password123!' --skip-r
 **Certificates (ADCS)**
 - PKI Enrollment Server enumeration
 - Certificate Authority detection
+- **Vulnerable certificate template detection via certipy** (ESC1, ESC2, ESC3, ESC4, ESC5, ESC6, ESC7, ESC8, ESC9, ESC10, ESC11, ESC13, ESC14, ESC15)
 
 **Exchange**
 - Default Exchange group detection
@@ -154,6 +157,17 @@ domain-audit run -d contoso.com -dc 10.0.0.1 -u admin -p 'Password123!' --skip-r
 ### External Tool Integration
 - **Impacket** - Kerberoasting, AS-REP roasting, authentication
 - **NetExec** - SMB enumeration, LDAP checks, SQL enumeration
+- **Certipy** - ADCS certificate template vulnerability detection
+
+## Startup Checks
+
+The tool automatically verifies at startup:
+
+1. **DNS Configuration** - Checks if DNS is set to the DC IP, attempts to auto-configure if running as root/admin
+2. **netexec Availability** - Verifies `nxc`/`netexec` is installed
+3. **certipy Availability** - Verifies `certipy` is installed
+
+If any check fails, the tool provides installation instructions and exits.
 
 ## Output
 
