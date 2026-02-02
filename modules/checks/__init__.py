@@ -44,8 +44,14 @@ class SecurityChecker:
         
         # Initialize sub-checkers
         self.domain_checker = DomainChecker(ldap_conn, output_paths)
-        self.password_checker = PasswordChecker(ldap_conn, output_paths)
-        self.laps_checker = LAPSChecker(ldap_conn, output_paths)
+        self.password_checker = PasswordChecker(ldap_conn, output_paths,
+                                                  server=ldap_conn.config.server,
+                                                  username=username, password=password,
+                                                  domain=domain)
+        self.laps_checker = LAPSChecker(ldap_conn, output_paths,
+                                        server=ldap_conn.config.server,
+                                        username=username, password=password,
+                                        domain=domain)
         self.description_checker = DescriptionChecker(ldap_conn, output_paths)
         self.roasting_checker = RoastingChecker(
             ldap_conn, output_paths,

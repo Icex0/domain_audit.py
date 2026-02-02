@@ -59,7 +59,7 @@ class DomainChecker:
                 f"  msDS-Behavior-Version: {domain_data.get('msDS-Behavior-Version', 'N/A')}",
             ]
             
-            if level < 10:
+            if level != 10:
                 self.logger.finding(f"The domain functional level is {level_name}")
                 write_file('\n'.join(output_lines), filepath, self.logger)
             else:
