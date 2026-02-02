@@ -23,6 +23,7 @@ from .azure import AzureChecker
 from .sccm import SCCMChecker
 from .bloodhound import BloodHoundChecker
 from .sql import SQLChecker
+from .privileged_groups import PrivilegedGroupsChecker
 
 
 class SecurityChecker:
@@ -78,6 +79,7 @@ class SecurityChecker:
                                                      password=password, hashes=hashes)
         self.sql_checker = SQLChecker(ldap_conn, output_paths,
                                        username=username, password=password, hashes=hashes)
+        self.privileged_groups_checker = PrivilegedGroupsChecker(ldap_conn, output_paths)
     
     def run_all_checks(self):
         """Run all Phase 4 and 5 security checks."""
@@ -104,6 +106,7 @@ class SecurityChecker:
         self.roasting_checker.check_roasting()
         self.delegation_checker.check_delegation()
         self.user_attrs_checker.check_user_attributes()
+        self.privileged_groups_checker.check_privileged_groups()
         
         # Phase 6 checks
         self.logger.section("SECURITY CHECKS - PART 3")
@@ -141,5 +144,5 @@ __all__ = [
     'DescriptionChecker', 'RoastingChecker', 'DelegationChecker', 'UserAttrsChecker',
     'OutdatedChecker', 'ADIDNSChecker', 'ExchangeChecker', 'ADCSChecker',
     'NetworkChecker', 'LDAPChecker', 'TrustChecker', 'AzureChecker', 'SCCMChecker',
-    'BloodHoundChecker', 'SQLChecker'
+    'BloodHoundChecker', 'SQLChecker', 'PrivilegedGroupsChecker'
 ]

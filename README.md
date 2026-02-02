@@ -79,6 +79,7 @@ domain-audit run -d contoso.com -dc 10.0.0.1 -u admin -p 'Password123!' --skip-r
 - Deployment coverage across computer objects
 - Legacy LAPS vs Windows LAPS detection
 - GPO deployment check
+- LAPS policy configuration (AdminAccountName, PasswordComplexity, PasswordLength, PasswordAgeDays, PwdExpirationProtectionEnabled, AdmPwdEnabled)
 
 **Kerberos Attacks**
 - Kerberoastable accounts (SPNs on user accounts)
@@ -102,6 +103,7 @@ domain-audit run -d contoso.com -dc 10.0.0.1 -u admin -p 'Password123!' --skip-r
 - NOT_DELEGATED flag on admin accounts
 - Password age for privileged users (>180 days)
 - KRBTGT password age
+- Membership of highly privileged groups (Account Operators, Backup Operators, Print Operators, DNS Admins, Schema Admins)
 
 **Stale Objects**
 - Inactive computers and users (no logon in 6+ months)
@@ -128,9 +130,11 @@ domain-audit run -d contoso.com -dc 10.0.0.1 -u admin -p 'Password123!' --skip-r
 - Default Exchange group detection
 - Legacy Exchange permissions
 
-**Azure & SCCM**
+**Azure**
 - Azure AD Connect detection
-- SCCM System Management container
+
+**SCCM**
+- SCCM System Management container detection
 
 **Network Services**
 - IP resolution and /24 range calculation
