@@ -5,6 +5,8 @@ from typing import Optional, List
 from pathlib import Path
 
 # Domain functional levels mapping
+# Note: Windows Server 2019 and 2022 use the same functional level as 2016 (level 7)
+# See: https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/active-directory-functional-levels
 DOMAIN_FUNCTIONAL_LEVELS = {
     0: "Windows 2000 native",
     1: "Windows 2003 interim",
@@ -14,8 +16,6 @@ DOMAIN_FUNCTIONAL_LEVELS = {
     5: "Windows 2012",
     6: "Windows 2012 R2",
     7: "Windows 2016",
-    8: "Windows 2019",
-    9: "Windows 2022",
     10: "Windows 2025"
 }
 

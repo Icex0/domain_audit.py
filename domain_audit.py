@@ -13,6 +13,7 @@ from .core.exceptions import DomainAuditError
 from .utils.logger import get_logger, set_verbose
 from .utils.output import create_output_directory, write_lines
 from .utils.ldap import LDAPConnection, LDAPConfig
+from .utils.dns import check_and_set_dns, reset_dns, is_admin, check_netexec_available
 from .modules.enumeration import ADEnumerator
 from .modules.checks import SecurityChecker
 
@@ -68,6 +69,15 @@ def run(
     # Setup logging
     set_verbose(verbose)
     logger = get_logger(verbose)
+    
+    # Check and set DNS to DC IP for proper hostname resolution
+    logger.log_verbose("Checking DNS configuration")
+    if not check_and_set_dns(server, domain, sys.argv):
+        raise typer.Exit(1)
+    
+    # Check if netexec is available
+    if not check_netexec_available():
+        raise typer.Exit(1)
     
     # Validate credentials
     if not password and not hash:
@@ -141,9 +151,20 @@ def run(
             
     except Exception as e:
         logger.error(f"Enumeration failed: {e}")
+        # Reset DNS before exiting on error
+        if is_admin():
+            reset_dns()
         raise typer.Exit(1)
     
     auth_manager.close()
+    
+    # Reset DNS after completion if we have admin privileges
+    if is_admin():
+        logger.log_verbose("Resetting DNS configuration")
+        success, msg = reset_dns()
+        if success:
+            logger.log_verbose(msg)
+    
     logger.success("\n\n[+] Domain audit completed")
 
 
@@ -211,6 +232,11 @@ def check(
     """Run a specific security check."""
     set_verbose(verbose)
     logger = get_logger(verbose)
+    
+    # Check and set DNS to DC IP for proper hostname resolution
+    logger.log_verbose("Checking DNS configuration")
+    if not check_and_set_dns(server, domain, sys.argv):
+        raise typer.Exit(1)
     
     logger.info(f"Running check: {check_name}")
     # TODO: Implement specific check execution

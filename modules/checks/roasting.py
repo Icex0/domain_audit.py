@@ -254,7 +254,6 @@ class RoastingChecker:
             if hashes:
                 write_lines(hashes, output_file)
                 self.logger.warning(f"[W] Extracted {len(hashes)} AS-REP hashes")
-                print(f"[*] Hashes saved to {output_file}")
             else:
                 self.logger.info("[+] No AS-REP hashes extracted")
                 
