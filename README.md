@@ -2,6 +2,12 @@
 
 Active Directory security auditing tool. Python port of `domain_audit.ps1`.
 
+## Requirements
+
+- Python 3.10+
+- Network access to target Domain Controller
+- Valid AD credentials (password or NTLM hash)
+
 ## Installation
 
 ### With UV (Recommended)
@@ -146,7 +152,6 @@ domain-audit run -d contoso.com -dc 10.0.0.1 -u admin -p 'Password123!' --skip-r
 - Impersonation checks
 
 ### External Tool Integration
-- **BloodHound** - Relationship mapping via bloodhound-python
 - **Impacket** - Kerberoasting, AS-REP roasting, authentication
 - **NetExec** - SMB enumeration, LDAP checks, SQL enumeration
 
@@ -160,20 +165,3 @@ contoso.com-20260201/
 ├── checks/      # Requires manual review (yellow)
 └── data/        # Raw enumeration data
 ```
-
-## Requirements
-
-- Python 3.10+
-- Network access to target Domain Controller
-- Valid AD credentials (password or NTLM hash)
-
-## Dependencies
-
-- impacket
-- ldap3
-- rich
-- typer
-
-## License
-
-MIT

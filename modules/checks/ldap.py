@@ -8,6 +8,10 @@ import re
 from typing import Dict, List
 from pathlib import Path
 
+from impacket.dcerpc.v5 import transport, rprn, epm
+from impacket.dcerpc.v5.dtypes import NULL
+from impacket.dcerpc.v5.rpcrt import RPC_C_AUTHN_WINNT, RPC_C_AUTHN_LEVEL_PKT_PRIVACY
+
 from ...utils.logger import get_logger
 from ...utils.ldap import LDAPConnection
 from ...utils.output import write_lines
@@ -356,7 +360,7 @@ class LDAPChecker:
             self.logger.error(f"[-] Error checking NETLOGON: {e}")
     
     def _check_printspooler_dc(self):
-        """Check if PrintSpooler service is running on DCs using rpcdump."""
+        """Check if PrintSpooler service is running on DCs using impacket RPC."""
         self.logger.info("---Checking PrintSpooler service on DCs---")
         
         try:
@@ -381,34 +385,13 @@ class LDAPChecker:
                     continue
                 
                 try:
-                    # Use impacket's rpcdump.py to check for MS-RPRN or MS-PAR
-                    result = subprocess.run(
-                        ['rpcdump.py', hostname],
-                        capture_output=True,
-                        text=True,
-                        timeout=30
-                    )
-                    
-                    # Debug: raw rpcdump output
-                    self.logger.debug(f"rpcdump stdout:\n{result.stdout}")
-                    self.logger.debug(f"rpcdump stderr:\n{result.stderr}")
-                    
-                    output = result.stdout + result.stderr
-                    
-                    # Check for Print Spooler RPC interfaces
-                    if 'MS-RPRN' in output or 'MS-PAR' in output:
+                    # Check for MS-RPRN (Print Spooler) using impacket
+                    if self._check_spooler_rpc(hostname):
                         self.logger.finding(f"PrintSpooler enabled on {name}")
                         spooler_enabled.append(f"{name} ({hostname})")
-                        spooler_enabled.append(output)
-                        spooler_enabled.append("")
                     else:
                         self.logger.success(f"[+] PrintSpooler disabled on {name}")
                         
-                except subprocess.TimeoutExpired:
-                    self.logger.warning(f"[!] Timeout checking {hostname}")
-                except FileNotFoundError:
-                    self.logger.error("[-] impacket rpcdump not available")
-                    break
                 except Exception as e:
                     self.logger.debug(f"Error checking {hostname}: {e}")
             
@@ -419,3 +402,31 @@ class LDAPChecker:
                 
         except Exception as e:
             self.logger.error(f"[-] Error checking PrintSpooler: {e}")
+    
+    def _check_spooler_rpc(self, target: str) -> bool:
+        """Check if Print Spooler RPC interface is available on target."""
+        try:
+            # MS-RPRN UUID (Print System Remote Protocol)
+            MSRPRN_UUID = ('12345678-1234-abcd-ef00-0123456789ab', '1.0')
+            
+            # Try to bind to the MS-RPRN interface
+            string_binding = f'ncacn_np:{target}[\\pipe\\spoolss]'
+            rpc_transport = transport.DCERPCTransportFactory(string_binding)
+            
+            # Set credentials if available
+            if self.username and self.password:
+                rpc_transport.set_credentials(self.username, self.password, self.domain, '', '')
+            
+            rpc_transport.set_connect_timeout(10)
+            
+            dce = rpc_transport.get_dce_rpc()
+            dce.connect()
+            dce.bind(rprn.MSRPC_UUID_RPRN)
+            
+            # If we get here, spooler is running
+            dce.disconnect()
+            return True
+            
+        except Exception as e:
+            self.logger.debug(f"Spooler check failed for {target}: {e}")
+            return False

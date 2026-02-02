@@ -3,6 +3,26 @@
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass
 
+# Workaround for MD4 being disabled in OpenSSL 3.0+
+# NTLM authentication requires MD4, so we patch hashlib to use pycryptodome
+import hashlib
+try:
+    hashlib.new('md4')
+except ValueError:
+    # MD4 not available, patch it with pycryptodome
+    import functools
+    from Cryptodome.Hash import MD4 as _MD4
+    
+    _orig_hashlib_new = hashlib.new
+    
+    @functools.wraps(_orig_hashlib_new)
+    def _patched_hashlib_new(name, *args, **kwargs):
+        if name.lower() == 'md4':
+            return _MD4.new(*args, **kwargs)
+        return _orig_hashlib_new(name, *args, **kwargs)
+    
+    hashlib.new = _patched_hashlib_new
+
 from ldap3 import Server, Connection, NTLM, SUBTREE, ALL_ATTRIBUTES
 from ldap3.core.exceptions import LDAPBindError, LDAPSocketOpenError, LDAPException
 
