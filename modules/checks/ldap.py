@@ -101,7 +101,7 @@ class LDAPChecker:
                         self.logger.success(f"[+] {name}: LDAP signing IS enforced")
                         results.append("LDAP signing: ENFORCED")
                     else:
-                        self.logger.finding(f"[-] {name}: LDAP signing NOT enforced")
+                        self.logger.finding(f"{name}: LDAP signing NOT enforced")
                         results.append("LDAP signing: NOT ENFORCED")
                         vulnerable_dcs.append(f"{name}: LDAP signing not enforced")
                 else:
@@ -114,7 +114,7 @@ class LDAPChecker:
                         self.logger.success(f"[+] {name}: LDAPS channel binding REQUIRED")
                         results.append("LDAPS channel binding: REQUIRED")
                     elif binding.lower() == 'never':
-                        self.logger.finding(f"[-] {name}: LDAPS channel binding NEVER - relay attacks possible")
+                        self.logger.finding(f"{name}: LDAPS channel binding NEVER - relay attacks possible")
                         results.append("LDAPS channel binding: NEVER (vulnerable to relay)")
                         vulnerable_dcs.append(f"{name}: LDAPS channel binding set to Never")
                     elif binding.lower() in ('supported', 'when_supported'):
@@ -141,7 +141,7 @@ class LDAPChecker:
                 self.logger.error("[-] netexec not found")
                 break
             except Exception as e:
-                self.logger.error(f"[-] Error checking {name}: {e}")
+                self.logger.error(f"Error checking {name}: {e}")
         
         # Write results
         if all_results:

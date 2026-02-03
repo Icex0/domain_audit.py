@@ -74,7 +74,7 @@ class SQLChecker:
         
         # Save results
         if linked_servers:
-            self.logger.finding(f"[!] Found linked servers on {len(linked_servers)} MSSQL hosts")
+            self.logger.finding(f"Found linked servers on {len(linked_servers)} MSSQL hosts")
             lines = []
             for item in linked_servers:
                 lines.append(f"Host: {item['host']}")
@@ -84,7 +84,7 @@ class SQLChecker:
             write_lines(lines, self.output_paths['findings'] / 'mssql_linked_servers.txt')
         
         if impersonate_privs:
-            self.logger.finding(f"[!] Found impersonation privileges on {len(impersonate_privs)} MSSQL hosts")
+            self.logger.finding(f"Found impersonation privileges on {len(impersonate_privs)} MSSQL hosts")
             lines = []
             for item in impersonate_privs:
                 lines.append(f"Host: {item['host']}")
@@ -94,7 +94,7 @@ class SQLChecker:
             write_lines(lines, self.output_paths['findings'] / 'mssql_impersonate_privs.txt')
         
         if encryption_disabled:
-            self.logger.finding(f"[!] Found {len(encryption_disabled)} MSSQL hosts with encryption disabled")
+            self.logger.finding(f"Found {len(encryption_disabled)} MSSQL hosts with encryption disabled")
             write_lines(encryption_disabled, self.output_paths['findings'] / 'mssql_encryption_disabled.txt')
         
         # Save all netexec outputs

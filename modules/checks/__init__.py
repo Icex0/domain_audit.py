@@ -24,6 +24,7 @@ from .sccm import SCCMChecker
 from .bloodhound import BloodHoundChecker
 from .sql import SQLChecker
 from .privileged_groups import PrivilegedGroupsChecker
+from .smb import SMBChecker
 
 
 class SecurityChecker:
@@ -80,6 +81,7 @@ class SecurityChecker:
         self.sql_checker = SQLChecker(ldap_conn, output_paths,
                                        username=username, password=password, hashes=hashes)
         self.privileged_groups_checker = PrivilegedGroupsChecker(ldap_conn, output_paths)
+        self.smb_checker = SMBChecker(ldap_conn, output_paths, domain=domain)
     
     def run_all_checks(self):
         """Run all Phase 4 and 5 security checks."""
@@ -133,6 +135,9 @@ class SecurityChecker:
         self.logger.section("SECURITY CHECKS - PART 7")
         self.network_checker.check_network()
         
+        # SMB access checks (runs after network scan identifies SMB hosts)
+        self.smb_checker.check_smb_access()
+        
         # Phase 12 checks
         self.logger.section("SECURITY CHECKS - PART 8")
         self.sql_checker.check_sql()
@@ -144,5 +149,5 @@ __all__ = [
     'DescriptionChecker', 'RoastingChecker', 'DelegationChecker', 'UserAttrsChecker',
     'OutdatedChecker', 'ADIDNSChecker', 'ExchangeChecker', 'ADCSChecker',
     'NetworkChecker', 'LDAPChecker', 'TrustChecker', 'AzureChecker', 'SCCMChecker',
-    'BloodHoundChecker', 'SQLChecker', 'PrivilegedGroupsChecker'
+    'BloodHoundChecker', 'SQLChecker', 'PrivilegedGroupsChecker', 'SMBChecker'
 ]

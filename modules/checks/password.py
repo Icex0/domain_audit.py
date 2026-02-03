@@ -219,16 +219,17 @@ class PasswordChecker:
             else:
                 self.logger.success("[+] Kerberos client validation is enabled")
             
-            # Write results
+            # Write results - only to findings if there are actual findings
             policy_lines.append("")
             if findings:
                 policy_lines.append("Findings:")
                 policy_lines.extend([f"  - {f}" for f in findings])
+                filepath = self.output_paths['findings'] / 'kerberospolicy.txt'
+                write_file('\n'.join(policy_lines), filepath, self.logger)
             else:
-                policy_lines.append("Findings: None - Kerberos policy is secure")
-            
-            filepath = self.output_paths['findings'] / 'kerberospolicy.txt'
-            write_file('\n'.join(policy_lines), filepath, self.logger)
+                policy_lines.append("Kerberos policy is secure (matches Microsoft recommendations)")
+                filepath = self.output_paths['checks'] / 'kerberospolicy.txt'
+                write_file('\n'.join(policy_lines), filepath, self.logger)
                 
         except Exception as e:
             self.logger.error(f"[-] Error checking Kerberos policy: {e}")
