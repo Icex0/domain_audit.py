@@ -152,7 +152,7 @@ domain_audit/
 
 ### Phase 12: SQL and Advanced
 - [x] `Invoke-ADCheckSQL` - SQL enumeration via netexec (enum_links, enum_impersonate)
-- [ ] `Invoke-ADCheckAccess` - Access checks
+- [ ] `Invoke-ADCheckAccess` - Access checks (SMB, RDP, WINRM, MSSQL local admin/access via netexec)
 
 ### Phase 13: Output and Reporting
 - [ ] `output/formatters.py` - JSON output

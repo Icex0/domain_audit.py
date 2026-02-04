@@ -44,19 +44,22 @@ pip install .
 
 ```bash
 # Run full audit
-domain-audit run -d contoso.com -dc 10.0.0.1 -u admin -p 'Password123!'
-
-# Pass-the-hash
-domain-audit run -d contoso.com -dc 10.0.0.1 -u admin -H aad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0
+domain-audit -d contoso.com -dc 10.0.0.1 -u admin -p 'Password123!'
 
 # Use LDAPS
-domain-audit run -d contoso.com -dc 10.0.0.1 -u admin -p 'Password123!' --ldaps
+domain-audit -d contoso.com -dc 10.0.0.1 -u admin -p 'Password123!' --ldaps
 
 # Skip BloodHound collection
-domain-audit run -d contoso.com -dc 10.0.0.1 -u admin -p 'Password123!' --skip-bloodhound
+domain-audit -d contoso.com -dc 10.0.0.1 -u admin -p 'Password123!' --skip-bloodhound
 
 # Skip Kerberoasting/AS-REP roasting
-domain-audit run -d contoso.com -dc 10.0.0.1 -u admin -p 'Password123!' --skip-roasting
+domain-audit -d contoso.com -dc 10.0.0.1 -u admin -p 'Password123!' --skip-roasting
+
+# List available checks
+domain-audit -L
+
+# Run specific check
+domain-audit --check adcs -d contoso.com -dc 10.0.0.1 -u admin -p 'Password123!'
 ```
 
 ## What It Does
@@ -141,6 +144,10 @@ domain-audit run -d contoso.com -dc 10.0.0.1 -u admin -p 'Password123!' --skip-r
 - Port scanning (SMB, WinRM, RDP, MSSQL, HTTP)
 - SMB signing enforcement
 - SMBv1 detection
+- SMB null session authentication check
+- SMB guest access check
+- SMB/RDP/WinRM/MSSQL access checks (local admin access via netexec)
+- RDP NLA disabled detection
 - WebClient service detection
 - PrintSpooler on Domain Controllers
 
@@ -154,6 +161,7 @@ domain-audit run -d contoso.com -dc 10.0.0.1 -u admin -p 'Password123!' --skip-r
 
 **SQL Server**
 - MSSQL server discovery
+- MSSQL sysadmin role detection
 - Encryption configuration
 - Linked server enumeration
 - Impersonation checks

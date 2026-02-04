@@ -25,6 +25,36 @@ from .bloodhound import BloodHoundChecker
 from .sql import SQLChecker
 from .privileged_groups import PrivilegedGroupsChecker
 from .smb import SMBChecker
+from .access import AccessChecker
+
+
+# Available checks registry - maps check name to (description, checker_attr, method_name)
+# Ordered by execution sequence in run_all_checks()
+AVAILABLE_CHECKS = {
+    'bloodhound': ('BloodHound data collection', 'bloodhound_checker', 'check_bloodhound'),
+    'functional-level': ('Domain functional level check', 'domain_checker', 'check_functional_level'),
+    'password-policy': ('Password policy checks', 'password_checker', 'check_password_policy'),
+    'kerberos-policy': ('Kerberos policy checks', 'password_checker', 'check_kerberos_policy'),
+    'fgpp': ('Fine-grained password policy', 'password_checker', 'check_fine_grained_password_policy'),
+    'laps': ('LAPS configuration check', 'laps_checker', 'check_laps'),
+    'descriptions': ('User/computer descriptions', 'description_checker', 'check_descriptions'),
+    'roasting': ('Kerberoast/AS-REP roast', 'roasting_checker', 'check_roasting'),
+    'delegation': ('Delegation configuration', 'delegation_checker', 'check_delegation'),
+    'user-attrs': ('User attributes check', 'user_attrs_checker', 'check_user_attributes'),
+    'privileged-groups': ('Privileged groups membership', 'privileged_groups_checker', 'check_privileged_groups'),
+    'outdated': ('Outdated OS/software', 'outdated_checker', 'run_all_checks'),
+    'adidns': ('AD-integrated DNS', 'adidns_checker', 'check_adidns'),
+    'exchange': ('Exchange configuration', 'exchange_checker', 'check_exchange'),
+    'adcs': ('AD Certificate Services', 'adcs_checker', 'check_adcs'),
+    'trusts': ('Domain trusts', 'trust_checker', 'check_trusts'),
+    'azure': ('Azure AD Connect', 'azure_checker', 'check_azure_ad_connect'),
+    'sccm': ('SCCM/MECM configuration', 'sccm_checker', 'check_sccm'),
+    'ldap': ('LDAP security settings', 'ldap_checker', 'check_ldap'),
+    'network': ('Network enumeration', 'network_checker', 'check_network'),
+    'smb': ('SMB security checks', 'smb_checker', 'check_smb_access'),
+    'access': ('Access checks (SMB/RDP/WINRM/MSSQL)', 'access_checker', 'check_access'),
+    'sql': ('SQL Server enumeration', 'sql_checker', 'check_sql'),
+}
 
 
 class SecurityChecker:
@@ -82,6 +112,9 @@ class SecurityChecker:
                                        username=username, password=password, hashes=hashes)
         self.privileged_groups_checker = PrivilegedGroupsChecker(ldap_conn, output_paths)
         self.smb_checker = SMBChecker(ldap_conn, output_paths, domain=domain)
+        self.access_checker = AccessChecker(ldap_conn, output_paths,
+                                             domain=domain, username=username,
+                                             password=password, hashes=hashes)
     
     def run_all_checks(self):
         """Run all Phase 4 and 5 security checks."""
@@ -140,7 +173,44 @@ class SecurityChecker:
         
         # Phase 12 checks
         self.logger.section("SECURITY CHECKS - PART 8")
+        self.access_checker.check_access()
         self.sql_checker.check_sql()
+    
+    def run_check(self, check_name: str, **kwargs) -> bool:
+        """Run a specific check by name.
+        
+        Returns True if check was found and executed, False otherwise.
+        """
+        if check_name not in AVAILABLE_CHECKS:
+            self.logger.error(f"[-] Unknown check: {check_name}")
+            return False
+        
+        description, checker_attr, method_name = AVAILABLE_CHECKS[check_name]
+        checker = getattr(self, checker_attr, None)
+        
+        if not checker:
+            self.logger.error(f"[-] Checker not initialized: {checker_attr}")
+            return False
+        
+        method = getattr(checker, method_name, None)
+        if not method:
+            self.logger.error(f"[-] Method not found: {method_name}")
+            return False
+        
+        self.logger.info(f"Running check: {check_name} - {description}")
+        
+        # Special handling for bloodhound which needs options
+        if check_name == 'bloodhound':
+            method(kwargs.get('bloodhound_options', 'all'))
+        else:
+            method()
+        
+        return True
+    
+    @staticmethod
+    def list_checks() -> Dict[str, str]:
+        """Return dict of available check names and descriptions."""
+        return {name: info[0] for name, info in AVAILABLE_CHECKS.items()}
 
 
 __all__ = [
@@ -149,5 +219,6 @@ __all__ = [
     'DescriptionChecker', 'RoastingChecker', 'DelegationChecker', 'UserAttrsChecker',
     'OutdatedChecker', 'ADIDNSChecker', 'ExchangeChecker', 'ADCSChecker',
     'NetworkChecker', 'LDAPChecker', 'TrustChecker', 'AzureChecker', 'SCCMChecker',
-    'BloodHoundChecker', 'SQLChecker', 'PrivilegedGroupsChecker', 'SMBChecker'
+    'BloodHoundChecker', 'SQLChecker', 'PrivilegedGroupsChecker', 'SMBChecker',
+    'AccessChecker'
 ]
