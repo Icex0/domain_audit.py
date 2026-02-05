@@ -5,7 +5,7 @@ from pathlib import Path
 
 from ...utils.logger import get_logger
 from ...utils.ldap import LDAPConnection
-from ...utils.output import write_csv
+from ...utils.output import write_csv, write_lines
 
 
 class DelegationChecker:

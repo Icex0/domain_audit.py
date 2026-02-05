@@ -37,7 +37,6 @@ def main(
     bloodhound_options: Annotated[str, typer.Option("--bloodhound-options", help="BloodHound collection method: all, default, sessions, acl, computer")] = "all",
     skip_roasting: Annotated[bool, typer.Option("--skip-roasting", help="Skip Kerberoast/AS-REP roast")] = False,
     use_ldaps: Annotated[bool, typer.Option("--ldaps", help="Use LDAPS instead of LDAP")] = False,
-    use_kerberos: Annotated[bool, typer.Option("--kerberos", "-k", help="Use Kerberos authentication")] = False,
     check: Annotated[Optional[str], typer.Option("--check", "-c", help="Run a specific check instead of full audit")] = None,
     list_checks: Annotated[bool, typer.Option("--list", "-L", help="List available checks")] = False,
 ):
@@ -81,7 +80,7 @@ def main(
             domain=domain, server=server, username=username,
             password=password, output=output, verbose=verbose,
             skip_bloodhound=skip_bloodhound, bloodhound_options=bloodhound_options,
-            skip_roasting=skip_roasting, use_ldaps=use_ldaps, use_kerberos=use_kerberos
+            skip_roasting=skip_roasting, use_ldaps=use_ldaps
         )
 
 
@@ -162,7 +161,7 @@ def _run_audit(
     password: Optional[str] = None,
     output: Optional[Path] = None, verbose: bool = False,
     skip_bloodhound: bool = False, bloodhound_options: str = "all",
-    skip_roasting: bool = False, use_ldaps: bool = False, use_kerberos: bool = False
+    skip_roasting: bool = False, use_ldaps: bool = False
 ):
     """Internal function to run the audit."""
     set_verbose(verbose)
@@ -200,7 +199,6 @@ def _run_audit(
         domain=domain,
         username=username,
         password=password or "",
-        use_kerberos=use_kerberos,
         use_ldaps=use_ldaps
     )
     
