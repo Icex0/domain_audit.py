@@ -3,7 +3,8 @@ name = "domain-audit"
 version = "1.0.0"
 description = "Active Directory Domain Audit Tool"
 authors = [
-    { name = "0xJs" }
+    { name = "0xJs" },
+    { name = "Icex0" },
 ]
 requires-python = ">=3.10"
 dependencies = [

@@ -40,6 +40,17 @@ source venv/bin/activate  # On Windows: venv\Scripts\activate
 pip install .
 ```
 
+### Docker
+
+```bash
+# Build the Docker image
+docker build -t domain-audit .
+
+# Run audit (results saved to ./results)
+docker run --rm -it -v $(pwd)/results:/data domain-audit \
+    -d contoso.com -dc 10.0.0.1 -u admin -p 'Password123!'
+```
+
 ## Usage
 
 ```bash
