@@ -26,6 +26,7 @@ from .sql import SQLChecker
 from .privileged_groups import PrivilegedGroupsChecker
 from .smb import SMBChecker
 from .access import AccessChecker
+from .wsus import WSUSChecker
 
 
 # Available checks registry - maps check name to (description, checker_attr, method_name)
@@ -54,6 +55,7 @@ AVAILABLE_CHECKS = {
     'smb': ('SMB security checks', 'smb_checker', 'check_smb_access'),
     'access': ('Access checks (SMB/RDP/WINRM/MSSQL)', 'access_checker', 'check_access'),
     'sql': ('SQL Server enumeration', 'sql_checker', 'check_sql'),
+    'wsus': ('WSUS HTTP configuration (MITM vulnerability)', 'wsus_checker', 'check_wsus'),
 }
 
 
@@ -115,6 +117,10 @@ class SecurityChecker:
         self.access_checker = AccessChecker(ldap_conn, output_paths,
                                              domain=domain, username=username,
                                              password=password, hashes=hashes)
+        self.wsus_checker = WSUSChecker(ldap_conn, output_paths,
+                                         server=ldap_conn.config.server,
+                                         domain=domain, username=username,
+                                         password=password)
     
     def run_all_checks(self):
         """Run all Phase 4 and 5 security checks."""
@@ -159,6 +165,7 @@ class SecurityChecker:
         self.azure_checker.check_azure_ad_connect()
         self.azure_checker.check_azure_ad_connect_server()
         self.sccm_checker.check_sccm()
+        self.wsus_checker.check_wsus()
         
         # Phase 8 checks
         self.logger.section("SECURITY CHECKS - PART 6")
@@ -220,5 +227,5 @@ __all__ = [
     'OutdatedChecker', 'ADIDNSChecker', 'ExchangeChecker', 'ADCSChecker',
     'NetworkChecker', 'LDAPChecker', 'TrustChecker', 'AzureChecker', 'SCCMChecker',
     'BloodHoundChecker', 'SQLChecker', 'PrivilegedGroupsChecker', 'SMBChecker',
-    'AccessChecker'
+    'AccessChecker', 'WSUSChecker'
 ]

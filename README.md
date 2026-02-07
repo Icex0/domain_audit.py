@@ -47,8 +47,7 @@ pip install .
 docker build -t domain-audit .
 
 # Run audit (results saved to ./results)
-docker run --rm -it -v $(pwd)/results:/data domain-audit \
-    -d contoso.com -dc 10.0.0.1 -u admin -p 'Password123!'
+docker run --rm -it -v $(pwd)/results:/data domain-audit -d contoso.com -dc 10.0.0.1 -u admin -p 'Password123!'
 ```
 
 ## Usage
@@ -149,6 +148,10 @@ domain-audit --check adcs -d contoso.com -dc 10.0.0.1 -u admin -p 'Password123!'
 
 **SCCM**
 - SCCM System Management container detection
+
+**WSUS**
+- WSUS server configuration via GPO (SYSVOL)
+- HTTP vs HTTPS detection (HTTP is vulnerable to MITM attacks via WSUSpect/wsuks)
 
 **Network Services**
 - IP resolution and /24 range calculation
