@@ -296,6 +296,7 @@ class AccessChecker:
             self.logger.success("[+] There are no systems where the current user has local admin over RDP")
         
         # Check for NLA disabled
+        self.logger.info("---Checking for RDP NLA configuration---")
         nla_disabled = self._parse_nla_disabled(output)
         
         if nla_disabled:

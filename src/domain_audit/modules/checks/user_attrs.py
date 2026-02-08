@@ -23,6 +23,7 @@ class UserAttrsChecker:
         self._check_dont_expire_password()
         self._check_reversible_encryption()
         self._check_des_encryption()
+        self._check_user_password()
     
     def _check_passwd_not_reqd(self):
         """Check for users with PASSWD_NOTREQD attribute."""
@@ -124,3 +125,50 @@ class UserAttrsChecker:
                 
         except Exception as e:
             self.logger.error(f"[-] Error checking DES encryption: {e}")
+    
+    def _check_user_password(self):
+        """Check for users with userPassword attribute exposed in LDAP.
+        
+        The userPassword attribute may contain cleartext or hashed passwords
+        stored in LDAP. This is a security risk if accessible by authenticated users.
+        """
+        self.logger.info("---Checking userPassword attribute---")
+        
+        try:
+            # Search for users with userPassword attribute present
+            users = self.ldap.query(
+                search_base=self.base_dn,
+                search_filter='(&(objectClass=user)(userPassword=*))',
+                attributes=['sAMAccountName', 'userPassword']
+            )
+            
+            filepath = self.output_paths['findings'] / 'users_userpassword.txt'
+            
+            if users:
+                count = len(users)
+                self.logger.finding(f"{count} users have userPassword attribute exposed!")
+                
+                results = []
+                for user in users:
+                    username = user.get('sAMAccountName', 'UNKNOWN')
+                    password_attr = user.get('userPassword', '')
+                    
+                    # Handle bytes or string values
+                    if isinstance(password_attr, bytes):
+                        try:
+                            password_attr = password_attr.decode('utf-8')
+                        except UnicodeDecodeError:
+                            password_attr = password_attr.hex()
+                    elif isinstance(password_attr, list):
+                        password_attr = str(password_attr[0]) if password_attr else ''
+                    
+                    self.logger.highlight(f"  User: {username} - userPassword: {password_attr}")
+                    results.append(f"{username}:{password_attr}")
+                
+                write_lines(results, filepath)
+                self.logger.info(f"[+] Results saved to {filepath}")
+            else:
+                self.logger.success("[+] No users with userPassword attribute exposed")
+                
+        except Exception as e:
+            self.logger.error(f"[-] Error checking userPassword: {e}")

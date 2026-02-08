@@ -110,6 +110,7 @@ domain-audit --check adcs -d contoso.com -dc 10.0.0.1 -u admin -p 'Password123!'
 - Reversible encryption enabled
 - DES-only Kerberos encryption
 - Sensitive data in user/group/computer descriptions
+- userPassword attribute exposed in LDAP (cleartext or hashed passwords)
 
 **Privileged Accounts**
 - Protected Users group membership
