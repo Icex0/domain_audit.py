@@ -104,6 +104,8 @@ class DCVulnsChecker:
             if self.domain:
                 cmd.extend(['-d', self.domain])
             
+            self.logger.debug(f"[*] Running: {' '.join(cmd)}")
+            
             self.logger.info("[*] Running netexec with nopac and zerologon modules...")
             
             result = subprocess.run(
@@ -114,6 +116,10 @@ class DCVulnsChecker:
             )
             
             output = result.stdout + result.stderr
+            
+            # Debug: raw netexec output
+            self.logger.debug(f"netexec dc_vulns stdout:\n{result.stdout}")
+            self.logger.debug(f"netexec dc_vulns stderr:\n{result.stderr}")
             
             # Save raw output
             write_lines(output.split('\n'),
@@ -134,13 +140,23 @@ class DCVulnsChecker:
             self.logger.error(f"[-] Error running DC vulnerability check: {e}")
     
     def _parse_vulnerability_output(self, output: str):
-        """Parse netexec output for vulnerabilities."""
+        """Parse netexec output for vulnerabilities and errors."""
         zerologon_vulnerable = []
         nopac_vulnerable = []
+        errors = []
         
         for line in output.split('\n'):
             line = line.strip()
             if not line:
+                continue
+            
+            # Check for errors in the output
+            if 'ERROR' in line or 'KerberosError' in line or 'SessionError' in line or 'Traceback' in line:
+                # Extract the error message if possible
+                if 'KRB_AP_ERR_SKEW' in line or 'Clock skew' in line:
+                    errors.append("Kerberos clock skew (time synchronization issue)")
+                elif 'KDC_ERR' in line:
+                    errors.append(f"Kerberos error: {line}")
                 continue
             
             # Extract IP from line
@@ -161,6 +177,13 @@ class DCVulnsChecker:
             elif line.startswith('NOPAC') or 'NOPAC' in line.split()[0]:
                 if ip not in nopac_vulnerable:
                     nopac_vulnerable.append(ip)
+        
+        # Report errors if any occurred
+        if errors:
+            errors = list(set(errors))  # Remove duplicates
+            self.logger.warning(f"[!] DC vulnerability check encountered errors (results may be incomplete):")
+            for error in errors:
+                self.logger.warning(f"    - {error}")
         
         # Report Zerologon findings
         if zerologon_vulnerable:

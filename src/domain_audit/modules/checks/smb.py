@@ -67,8 +67,12 @@ class SMBChecker:
             
             # Run netexec with null credentials (empty username and password)
             # netexec smb <targets> -u '' -p ''
+            cmd = ['netexec', 'smb', hosts_file, '-u', '', '-p', '']
+            
+            self.logger.debug(f"[*] Running: {' '.join(cmd)}")
+            
             result = subprocess.run(
-                ['netexec', 'smb', hosts_file, '-u', '', '-p', ''],
+                cmd,
                 capture_output=True,
                 text=True,
                 timeout=300
@@ -136,8 +140,12 @@ class SMBChecker:
             
             # Run netexec with guest credentials
             # netexec smb <targets> -u 'guest' -p ''
+            cmd = ['netexec', 'smb', hosts_file, '-u', 'guest', '-p', '']
+            
+            self.logger.debug(f"[*] Running: {' '.join(cmd)}")
+            
             result = subprocess.run(
-                ['netexec', 'smb', hosts_file, '-u', 'guest', '-p', ''],
+                cmd,
                 capture_output=True,
                 text=True,
                 timeout=300

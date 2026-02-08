@@ -514,6 +514,8 @@ class NetworkChecker:
                 if self.domain:
                     cmd.extend(['-d', self.domain])
                 
+                self.logger.debug(f"[*] Running: {' '.join(cmd)}")
+                
                 result = subprocess.run(
                     cmd,
                     capture_output=True,

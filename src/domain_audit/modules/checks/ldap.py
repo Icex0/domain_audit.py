@@ -72,8 +72,11 @@ class LDAPChecker:
             self.logger.info(f"[*] Checking DC: {name} ({hostname})")
             
             try:
+                cmd = ['netexec', 'ldap', hostname, '-u', self.username, '-p', self.password]
+                self.logger.debug(f"[*] Running: {' '.join(cmd)}")
+                
                 result = subprocess.run(
-                    ['netexec', 'ldap', hostname, '-u', self.username, '-p', self.password],
+                    cmd,
                     capture_output=True,
                     text=True,
                     timeout=60
