@@ -159,6 +159,10 @@ domain-audit --check adcs -d contoso.com -dc 10.0.0.1 -u admin -p 'Password123!'
 - WSUS server configuration via GPO (SYSVOL)
 - HTTP vs HTTPS detection (HTTP is vulnerable to MITM attacks via WSUSpect/wsuks)
 
+**DC Vulnerabilities**
+- Zerologon (CVE-2020-1472) - Domain takeover vulnerability
+- NoPac (CVE-2021-42278/CVE-2021-42287) - Privilege escalation to Domain Admin
+
 **Network Services**
 - IP resolution and /24 range calculation
 - Port scanning (SMB, WinRM, RDP, MSSQL, HTTP)
@@ -169,6 +173,7 @@ domain-audit --check adcs -d contoso.com -dc 10.0.0.1 -u admin -p 'Password123!'
 - SMB/RDP/WinRM/MSSQL access checks (local admin access via netexec)
 - RDP NLA disabled detection
 - WebClient service detection
+- NTLM reflection vulnerability detection
 - PrintSpooler on Domain Controllers
 
 **LDAP Security**

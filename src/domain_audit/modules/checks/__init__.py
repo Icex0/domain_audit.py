@@ -27,6 +27,7 @@ from .privileged_groups import PrivilegedGroupsChecker
 from .smb import SMBChecker
 from .access import AccessChecker
 from .wsus import WSUSChecker
+from .dc_vulns import DCVulnsChecker
 
 
 # Available checks registry - maps check name to (description, checker_attr, method_name)
@@ -56,6 +57,7 @@ AVAILABLE_CHECKS = {
     'access': ('Access checks (SMB/RDP/WINRM/MSSQL)', 'access_checker', 'check_access'),
     'sql': ('SQL Server enumeration', 'sql_checker', 'check_sql'),
     'wsus': ('WSUS HTTP configuration (MITM vulnerability)', 'wsus_checker', 'check_wsus'),
+    'dc-vulns': ('DC vulnerabilities (Zerologon, NoPac)', 'dc_vulns_checker', 'check_dc_vulnerabilities'),
 }
 
 
@@ -102,7 +104,9 @@ class SecurityChecker:
                                          server=ldap_conn.config.server,
                                          domain=domain, username=username,
                                          password=password, hashes=hashes)
-        self.network_checker = NetworkChecker(ldap_conn, output_paths, server=ldap_conn.config.server)
+        self.network_checker = NetworkChecker(ldap_conn, output_paths, server=ldap_conn.config.server,
+                                              domain=domain, username=username,
+                                              password=password, hashes=hashes)
         self.ldap_checker = LDAPChecker(ldap_conn, output_paths, server=ldap_conn.config.server,
                                          username=username, password=password, domain=domain)
         self.trust_checker = TrustChecker(ldap_conn, output_paths)
@@ -122,6 +126,9 @@ class SecurityChecker:
                                          server=ldap_conn.config.server,
                                          domain=domain, username=username,
                                          password=password)
+        self.dc_vulns_checker = DCVulnsChecker(ldap_conn, output_paths,
+                                                domain=domain, username=username,
+                                                password=password, hashes=hashes)
     
     def run_all_checks(self):
         """Run all Phase 4 and 5 security checks."""
@@ -185,6 +192,9 @@ class SecurityChecker:
         self.logger.section("SECURITY CHECKS - PART 8")
         self.access_checker.check_access()
         self.sql_checker.check_sql()
+        
+        # DC vulnerability checks
+        self.dc_vulns_checker.check_dc_vulnerabilities()
     
     def run_check(self, check_name: str, **kwargs) -> bool:
         """Run a specific check by name.
@@ -230,5 +240,5 @@ __all__ = [
     'OutdatedChecker', 'ADIDNSChecker', 'ExchangeChecker', 'ADCSChecker',
     'NetworkChecker', 'LDAPChecker', 'TrustChecker', 'AzureChecker', 'SCCMChecker',
     'BloodHoundChecker', 'SQLChecker', 'PrivilegedGroupsChecker', 'SMBChecker',
-    'AccessChecker', 'WSUSChecker'
+    'AccessChecker', 'WSUSChecker', 'DCVulnsChecker'
 ]

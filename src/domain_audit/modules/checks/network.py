@@ -35,12 +35,17 @@ class NetworkChecker:
     DEFAULT_PORTS = [80, 443, 139, 445, 1433, 3389, 5985, 5986]
     
     def __init__(self, ldap_conn: LDAPConnection, output_paths: Dict[str, Path], 
-                 server: str = None):
+                 server: str = None, domain: str = None, username: str = None,
+                 password: str = None, hashes: str = None):
         self.ldap = ldap_conn
         self.output_paths = output_paths
         self.logger = get_logger()
         self.base_dn = ldap_conn.config.base_dn
         self.dns_server = server or ldap_conn.config.server
+        self.domain = domain
+        self.username = username
+        self.password = password
+        self.hashes = hashes
         self.hosts: List[HostInfo] = []
     
     def check_network(self):
@@ -470,14 +475,15 @@ class NetworkChecker:
             self.logger.info("[*] Install impacket: pip install impacket")
     
     def _check_webclient(self):
-        """Check for WebClient service on SMB hosts using netexec."""
-        self.logger.info("---Checking for WebClient service---")
-        
+        """Check for WebClient service and NTLM reflection on SMB hosts using netexec."""
         # Get SMB hosts
         smb_hosts = [h for h in self.hosts if 445 in h.open_ports]
         
         if not smb_hosts:
+            self.logger.info("---Checking for WebClient service---")
             self.logger.info("[*] No SMB hosts to check for WebClient")
+            self.logger.info("---Checking for NTLM reflection---")
+            self.logger.info("[*] No SMB hosts to check for NTLM reflection")
             return
         
         # Write SMB hosts to temp file for netexec
@@ -492,40 +498,51 @@ class NetworkChecker:
                         f.write(f"{host.ip}\n")
                 hosts_file = f.name
             
-            self.logger.info(f"[*] Checking {len(smb_hosts)} SMB hosts for WebClient service")
-            
-            # Run netexec with webdav module
-            # netexec smb <hosts_file> -M webdav
+            # Run netexec with both webdav and ntlm_reflection modules (single command)
+            # netexec smb <hosts_file> -u user -p pass -d domain -M webdav -M ntlm_reflection
             try:
+                cmd = [
+                    'netexec', 'smb', hosts_file,
+                    '-M', 'webdav', '-M', 'ntlm_reflection'
+                ]
+                
+                # Add credentials if available
+                if self.username:
+                    cmd.extend(['-u', self.username])
+                if self.password:
+                    cmd.extend(['-p', self.password])
+                if self.domain:
+                    cmd.extend(['-d', self.domain])
+                
                 result = subprocess.run(
-                    ['netexec', 'smb', hosts_file, '-M', 'webdav'],
+                    cmd,
                     capture_output=True,
                     text=True,
                     timeout=300  # 5 minute timeout
                 )
                 
                 # Debug: raw netexec output
-                self.logger.debug(f"netexec webdav stdout:\n{result.stdout}")
-                self.logger.debug(f"netexec webdav stderr:\n{result.stderr}")
+                self.logger.debug(f"netexec webdav/ntlm_reflection stdout:\n{result.stdout}")
+                self.logger.debug(f"netexec webdav/ntlm_reflection stderr:\n{result.stderr}")
                 
                 output = result.stdout + result.stderr
                 
-                # Parse for "WebClient Service enabled on" lines
+                # Write all netexec output
+                write_lines(output.split('\n'), 
+                          self.output_paths['data'] / 'netexec_webdav_ntlm.txt')
+                
+                # --- WebClient service check ---
+                self.logger.info("---Checking for WebClient service---")
+                
                 webclient_hosts = []
                 for line in output.split('\n'):
                     if 'WebClient Service enabled on' in line:
-                        # Extract IP address from line
                         import re
                         ip_match = re.search(r'\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b', line)
                         if ip_match:
                             webclient_hosts.append(ip_match.group())
                 
-                # Remove duplicates and sort
                 webclient_hosts = sorted(set(webclient_hosts))
-                
-                # Write all netexec output
-                write_lines(output.split('\n'), 
-                          self.output_paths['data'] / 'netexec_webdav.txt')
                 
                 if webclient_hosts:
                     self.logger.finding(f"{len(webclient_hosts)} systems have WebClient service running")
@@ -533,6 +550,26 @@ class NetworkChecker:
                                self.output_paths['findings'] / 'computers_webdav.txt')
                 else:
                     self.logger.success("[+] No systems have WebClient service running")
+                
+                # --- NTLM reflection check ---
+                self.logger.info("---Checking for NTLM reflection---")
+                
+                ntlm_reflection_hosts = []
+                for line in output.split('\n'):
+                    if line.startswith('NTLM_REF') and 'VULNERABLE' in line:
+                        import re
+                        ip_match = re.search(r'\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b', line)
+                        if ip_match:
+                            ntlm_reflection_hosts.append(ip_match.group())
+                
+                ntlm_reflection_hosts = sorted(set(ntlm_reflection_hosts))
+                
+                if ntlm_reflection_hosts:
+                    self.logger.finding(f"{len(ntlm_reflection_hosts)} systems vulnerable to NTLM reflection")
+                    write_lines(ntlm_reflection_hosts, 
+                               self.output_paths['findings'] / 'computers_ntlm_reflection.txt')
+                else:
+                    self.logger.success("[+] No systems vulnerable to NTLM reflection")
                     
             except subprocess.TimeoutExpired:
                 self.logger.error("[-] netexec timed out after 5 minutes")
@@ -549,5 +586,5 @@ class NetworkChecker:
                     pass
                     
         except Exception as e:
-            self.logger.error(f"[-] Error checking WebClient: {e}")
+            self.logger.error(f"[-] Error checking WebClient/NTLM reflection: {e}")
 
