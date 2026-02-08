@@ -246,7 +246,8 @@ def _run_audit(
                 username=username,
                 password=password,
                 bloodhound_options=bloodhound_options,
-                skip_bloodhound=skip_bloodhound
+                skip_bloodhound=skip_bloodhound,
+                skip_roasting=skip_roasting
             )
             checker.run_all_checks()
             

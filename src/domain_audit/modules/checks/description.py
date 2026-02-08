@@ -48,6 +48,10 @@ class DescriptionChecker:
                 # Check for password-related keywords - this is the actual finding
                 suspicious = []
                 for user in users:
+                    username = user.get('sAMAccountName', '').lower()
+                    # Skip krbtgt account
+                    if username == 'krbtgt':
+                        continue
                     desc = user.get('description', '').lower()
                     if any(kw in desc for kw in self.pass_keywords):
                         suspicious.append(user)

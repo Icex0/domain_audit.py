@@ -65,7 +65,7 @@ class SecurityChecker:
     def __init__(self, ldap_conn: LDAPConnection, output_paths: Dict[str, Path],
                  domain: str = None, username: str = None, password: str = None,
                  hashes: str = None, bloodhound_options: str = "all",
-                 skip_bloodhound: bool = False):
+                 skip_bloodhound: bool = False, skip_roasting: bool = False):
         self.ldap = ldap_conn
         self.output_paths = output_paths
         self.logger = get_logger()
@@ -75,6 +75,7 @@ class SecurityChecker:
         self.hashes = hashes
         self.bloodhound_options = bloodhound_options
         self.skip_bloodhound = skip_bloodhound
+        self.skip_roasting = skip_roasting
         
         # Initialize sub-checkers
         self.domain_checker = DomainChecker(ldap_conn, output_paths)
@@ -144,7 +145,8 @@ class SecurityChecker:
         # Phase 5 checks
         self.logger.section("SECURITY CHECKS - PART 2")
         self.description_checker.check_descriptions()
-        self.roasting_checker.check_roasting()
+        if not self.skip_roasting:
+            self.roasting_checker.check_roasting()
         self.delegation_checker.check_delegation()
         self.user_attrs_checker.check_user_attributes()
         self.privileged_groups_checker.check_privileged_groups()

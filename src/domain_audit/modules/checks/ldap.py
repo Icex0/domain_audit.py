@@ -398,8 +398,7 @@ class LDAPChecker:
             if spooler_enabled:
                 write_lines(spooler_enabled,
                            self.output_paths['findings'] / 'printspooler_domaincontrollers.txt')
-                self.logger.finding("PrintSpooler enabled on one or more DCs - PetitPotam attack possible")
-                
+                                           
         except Exception as e:
             self.logger.error(f"[-] Error checking PrintSpooler: {e}")
     
