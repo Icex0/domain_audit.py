@@ -145,6 +145,12 @@ domain-audit --check adcs -d contoso.com -dc 10.0.0.1 -u admin -p 'Password123!'
 
 **Azure**
 - Azure AD Connect detection
+- AZUREADSSOACC security (Seamless SSO):
+  - Unconstrained delegation disabled on account
+  - Constrained delegation disabled (account can't delegate to other services)
+  - Resource-based constrained delegation (RBCD) disabled on account
+  - No other accounts can delegate to AZUREADSSOACC
+  - Kerberos decryption key age (30-day renewal recommendation)
 
 **SCCM**
 - SCCM System Management container detection

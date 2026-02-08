@@ -1,11 +1,12 @@
 """Azure AD Connect checks."""
 
+from datetime import datetime, timedelta
 from typing import Dict, List
 from pathlib import Path
 
 from ...utils.logger import get_logger
 from ...utils.ldap import LDAPConnection
-from ...utils.output import write_csv, write_file
+from ...utils.output import write_csv, write_file, write_lines
 
 
 class AzureChecker:
@@ -190,3 +191,136 @@ class AzureChecker:
                     
         except Exception as e:
             self.logger.error(f"[-] Error checking Azure AD Connect server: {e}")
+    
+    def check_azureadssoacc_security(self):
+        """Check AZUREADSSOACC computer account security.
+        
+        Per Microsoft recommendations:
+        - Kerberos delegation must be disabled on the account
+        - No other account should have delegation permissions to AZUREADSSOACC
+        - Kerberos decryption key should be renewed at least every 30 days
+        
+        Reference: https://learn.microsoft.com/en-us/entra/identity/hybrid/connect/how-to-connect-sso-how-it-works
+        """
+        self.logger.info("---Checking AZUREADSSOACC security---")
+        
+        try:
+            # Search for AZUREADSSOACC computer account
+            results = self.ldap.query(
+                search_base=self.base_dn,
+                search_filter='(&(objectClass=computer)(sAMAccountName=AZUREADSSOACC$))',
+                attributes=[
+                    'sAMAccountName', 'userAccountControl', 'pwdLastSet',
+                    'msDS-AllowedToDelegateTo', 'msDS-AllowedToActOnBehalfOfOtherIdentity'
+                ]
+            )
+            
+            if not results:
+                self.logger.info("[*] AZUREADSSOACC computer account not found (Seamless SSO not configured)")
+                return
+            
+            account = results[0]
+            findings = []
+            account_name = account.get('sAMAccountName', 'AZUREADSSOACC$')
+            
+            self.logger.warning(f"[!] Found {account_name} - checking security configuration")
+            
+            # Check 1: Unconstrained Kerberos delegation disabled (TRUSTED_FOR_DELEGATION = 524288)
+            uac = account.get('userAccountControl', 0)
+            if isinstance(uac, str):
+                uac = int(uac)
+            
+            if uac & 524288:  # TRUSTED_FOR_DELEGATION
+                self.logger.finding(f"AZUREADSSOACC has Kerberos delegation ENABLED (vulnerable!)")
+                findings.append("CRITICAL: Kerberos delegation is ENABLED on AZUREADSSOACC - should be disabled")
+            else:
+                self.logger.success("[+] AZUREADSSOACC has Kerberos delegation disabled")
+            
+            # Check 2: Constrained delegation (msDS-AllowedToDelegateTo)
+            allowed_to_delegate = account.get('msDS-AllowedToDelegateTo')
+            if allowed_to_delegate:
+                self.logger.finding("AZUREADSSOACC has constrained delegation configured")
+                if isinstance(allowed_to_delegate, list):
+                    for target in allowed_to_delegate:
+                        findings.append(f"CRITICAL: Constrained delegation to: {target}")
+                else:
+                    findings.append(f"CRITICAL: Constrained delegation to: {allowed_to_delegate}")
+            else:
+                self.logger.success("[+] AZUREADSSOACC has no constrained delegation")
+            
+            # Check 3: Resource-based constrained delegation (msDS-AllowedToActOnBehalfOfOtherIdentity)
+            rbcd = account.get('msDS-AllowedToActOnBehalfOfOtherIdentity')
+            if rbcd:
+                self.logger.finding("AZUREADSSOACC has RBCD configured - other accounts can delegate to it!")
+                findings.append("CRITICAL: RBCD is configured - other accounts have delegation permissions to AZUREADSSOACC")
+            else:
+                self.logger.success("[+] No RBCD configured on AZUREADSSOACC")
+            
+            # Check 4: Kerberos decryption key age (derived from computer account password)
+            # Microsoft recommends renewing at least every 30 days via pwdLastSet
+            pwd_last_set = account.get('pwdLastSet')
+            if pwd_last_set:
+                try:
+                    # pwdLastSet is Windows FILETIME (100-nanosecond intervals since 1601-01-01)
+                    if isinstance(pwd_last_set, str):
+                        pwd_last_set = int(pwd_last_set)
+                    
+                    if pwd_last_set > 0:
+                        # Convert Windows FILETIME to datetime
+                        # FILETIME epoch is 1601-01-01, Unix epoch is 1970-01-01
+                        # Difference is 116444736000000000 (100-nanosecond intervals)
+                        windows_epoch_diff = 116444736000000000
+                        unix_timestamp = (pwd_last_set - windows_epoch_diff) / 10000000
+                        pwd_date = datetime.fromtimestamp(unix_timestamp)
+                        
+                        age_days = (datetime.now() - pwd_date).days
+                        
+                        if age_days > 30:
+                            self.logger.finding(f"AZUREADSSOACC Kerberos key is {age_days} days old (should be renewed every 30 days)")
+                            findings.append(f"WARNING: Kerberos decryption key is {age_days} days old - Microsoft recommends renewal every 30 days")
+                            findings.append(f"Last password change: {pwd_date.strftime('%Y-%m-%d')}")
+                        else:
+                            self.logger.success(f"[+] AZUREADSSOACC Kerberos key is {age_days} days old (within 30-day window)")
+                    else:
+                        self.logger.warning("[!] AZUREADSSOACC password never set or set to never expire")
+                        findings.append("WARNING: Password appears to never have been set")
+                        
+                except Exception as e:
+                    self.logger.debug(f"Could not parse pwdLastSet: {e}")
+            
+            # Check 5: Check if any other accounts have delegation to AZUREADSSOACC
+            self._check_delegation_to_azureadssoacc(findings)
+            
+            # Write findings
+            if findings:
+                write_lines(
+                    ["AZUREADSSOACC Security Issues", "=" * 40, ""] + findings + 
+                    ["", "Reference: https://learn.microsoft.com/en-us/entra/identity/hybrid/connect/how-to-connect-sso-how-it-works"],
+                    self.output_paths['findings'] / 'azureadssoacc_security.txt'
+                )
+            else:
+                self.logger.success("[+] AZUREADSSOACC security configuration is correct")
+                
+        except Exception as e:
+            self.logger.error(f"[-] Error checking AZUREADSSOACC security: {e}")
+    
+    def _check_delegation_to_azureadssoacc(self, findings: List[str]):
+        """Check if any accounts have constrained delegation permissions to AZUREADSSOACC."""
+        try:
+            # Search for accounts with constrained delegation to AZUREADSSOACC
+            results = self.ldap.query(
+                search_base=self.base_dn,
+                search_filter='(msDS-AllowedToDelegateTo=*AZUREADSSOACC*)',
+                attributes=['sAMAccountName', 'msDS-AllowedToDelegateTo', 'objectClass']
+            )
+            
+            if results:
+                self.logger.finding(f"{len(results)} accounts have constrained delegation to AZUREADSSOACC")
+                for result in results:
+                    account_name = result.get('sAMAccountName', 'Unknown')
+                    findings.append(f"CRITICAL: {account_name} has constrained delegation permissions to AZUREADSSOACC")
+            else:
+                self.logger.success("[+] No accounts have constrained delegation to AZUREADSSOACC")
+                
+        except Exception as e:
+            self.logger.debug(f"Error checking delegation to AZUREADSSOACC: {e}")

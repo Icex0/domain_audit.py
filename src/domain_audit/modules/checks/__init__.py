@@ -164,6 +164,7 @@ class SecurityChecker:
         self.trust_checker.check_trusts()
         self.azure_checker.check_azure_ad_connect()
         self.azure_checker.check_azure_ad_connect_server()
+        self.azure_checker.check_azureadssoacc_security()
         self.sccm_checker.check_sccm()
         self.wsus_checker.check_wsus()
         
