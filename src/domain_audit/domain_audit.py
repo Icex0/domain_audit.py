@@ -237,7 +237,7 @@ def _run_audit(
             domain_data = enumerator.enumerate_all()
             
             # Print domain summary
-            _print_domain_summary(domain_data, paths, domain)
+            _print_domain_summary(domain_data, paths, domain, enumerator)
             
             # Run security checks
             checker = SecurityChecker(
@@ -289,7 +289,7 @@ def print_explanation(output_dir: Path):
     logger.info("")
 
 
-def _print_domain_summary(domain_data, paths, domain):
+def _print_domain_summary(domain_data, paths, domain, enumerator):
     """Print summary of domain enumeration."""
     logger = get_logger()
     
@@ -335,6 +335,9 @@ def _print_domain_summary(domain_data, paths, domain):
     if domain_data.groups:
         groups = [g.get('sAMAccountName', '') for g in domain_data.groups if g.get('sAMAccountName')]
         write_lines(sorted(groups), paths['data'] / 'list_groups.txt')
+    
+    # Domain Admins and Enterprise Admins
+    enumerator.enumerate_privileged_group_members(domain_data.domain_sid)
     
     logger.info("")
 
