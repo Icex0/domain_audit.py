@@ -171,6 +171,7 @@ domain-audit --check adcs -d contoso.com -dc 10.0.0.1 -u admin -p 'Password123!'
 - SMBv1 detection
 - SMB null session authentication check
 - SMB guest access check
+- Domain admin sessions on non-DCs
 - SMB/RDP/WinRM/MSSQL access checks (local admin access via netexec)
 - RDP NLA disabled detection
 - WebClient service detection
