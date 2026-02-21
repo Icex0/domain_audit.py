@@ -28,6 +28,7 @@ from .smb import SMBChecker
 from .access import AccessChecker
 from .wsus import WSUSChecker
 from .dc_vulns import DCVulnsChecker
+from .ntlm import NTLMChecker
 
 
 # Available checks registry - maps check name to (description, checker_attr, method_name)
@@ -59,6 +60,7 @@ AVAILABLE_CHECKS = {
     'sql': ('SQL Server enumeration', 'sql_checker', 'check_sql'),
     'wsus': ('WSUS HTTP configuration (MITM vulnerability)', 'wsus_checker', 'check_wsus'),
     'dc-vulns': ('DC vulnerabilities (Zerologon, NoPac)', 'dc_vulns_checker', 'check_dc_vulnerabilities'),
+    'ntlm': ('NTLM security (NTLMv1 support, NTLM restrictions)', 'ntlm_checker', 'check_ntlm'),
 }
 
 
@@ -132,6 +134,10 @@ class SecurityChecker:
         self.dc_vulns_checker = DCVulnsChecker(ldap_conn, output_paths,
                                                 domain=domain, username=username,
                                                 password=password, hashes=hashes)
+        self.ntlm_checker = NTLMChecker(ldap_conn, output_paths,
+                                         server=ldap_conn.config.server,
+                                         domain=domain, username=username,
+                                         password=password)
     
     def run_all_checks(self):
         """Run all Phase 4 and 5 security checks."""
@@ -151,6 +157,9 @@ class SecurityChecker:
         
         # LAPS checks
         self.laps_checker.check_laps()
+        
+        # NTLM security checks
+        self.ntlm_checker.check_ntlm()
         
         # Phase 5 checks
         self.logger.section("SECURITY CHECKS - PART 2")
@@ -244,5 +253,5 @@ __all__ = [
     'OutdatedChecker', 'ADIDNSChecker', 'ExchangeChecker', 'ADCSChecker',
     'NetworkChecker', 'LDAPChecker', 'TrustChecker', 'AzureChecker', 'SCCMChecker',
     'BloodHoundChecker', 'SQLChecker', 'PrivilegedGroupsChecker', 'SMBChecker',
-    'AccessChecker', 'WSUSChecker', 'DCVulnsChecker'
+    'AccessChecker', 'WSUSChecker', 'DCVulnsChecker', 'NTLMChecker'
 ]

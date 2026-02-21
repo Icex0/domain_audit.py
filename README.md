@@ -164,6 +164,10 @@ domain-audit --check adcs -d contoso.com -dc 10.0.0.1 -u admin -p 'Password123!'
 - Zerologon (CVE-2020-1472) - Domain takeover vulnerability
 - NoPac (CVE-2021-42278/CVE-2021-42287) - Privilege escalation to Domain Admin
 
+**NTLM Security**
+- NTLMv1 support detection (LmCompatibilityLevel 0/1/2 vulnerable to downgrade/relay attacks)
+- NTLM restriction policies (ideally NTLM disabled, Kerberos only)
+
 **Network Services**
 - IP resolution and /24 range calculation
 - Port scanning (SMB, WinRM, RDP, MSSQL, HTTP)

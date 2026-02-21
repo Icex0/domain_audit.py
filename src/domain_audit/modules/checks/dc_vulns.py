@@ -179,11 +179,18 @@ class DCVulnsChecker:
                     nopac_vulnerable.append(ip)
         
         # Report errors if any occurred
+        has_errors = False
         if errors:
             errors = list(set(errors))  # Remove duplicates
-            self.logger.warning(f"[!] DC vulnerability check encountered errors (results may be incomplete):")
+            has_errors = True
+            self.logger.warning(f"[!] DC vulnerability check encountered errors (results incomplete):")
             for error in errors:
                 self.logger.warning(f"    - {error}")
+        
+        # Only report results if no errors occurred
+        if has_errors:
+            self.logger.warning("[!] DC vulnerability checks could not complete due to errors")
+            return
         
         # Report Zerologon findings
         if zerologon_vulnerable:
