@@ -39,15 +39,9 @@ class DomainChecker:
                 level = level[0] if level else 0
             level = int(level) if level else 0
             
-            level_map = DOMAIN_FUNCTIONAL_LEVELS.copy()
-            level_map.update({
-                8: "Windows Server 2019",
-                9: "Windows Server 2022",
-                10: "Windows Server 2025"
-            })
-            
-            level_name = level_map.get(level, f"Unknown ({level})")
-            filepath = self.output_paths['findings'] / 'domainfunctionallevel.txt'
+            level_name = DOMAIN_FUNCTIONAL_LEVELS.get(level, f"Unknown ({level})")
+            filepath_findings = self.output_paths['findings'] / 'domainfunctionallevel.txt'
+            filepath_checks = self.output_paths['checks'] / 'domainfunctionallevel.txt'
             
             output_lines = [
                 f"Domain: {domain_data.get('name', 'unknown')}",
@@ -59,9 +53,11 @@ class DomainChecker:
                 f"  msDS-Behavior-Version: {domain_data.get('msDS-Behavior-Version', 'N/A')}",
             ]
             
-            if level != 10:
-                self.logger.finding(f"The domain functional level is {level_name}")
-                write_file('\n'.join(output_lines), filepath, self.logger)
+            # Level 0-6: Obsolete (Server 2012 R2 and older, all end-of-support) - finding
+            # Level 7+:  Current (Server 2016/2019/2022/2025) - secure
+            if level <= 6:
+                self.logger.finding(f"The domain functional level is {level_name} (obsolete)")
+                write_file('\n'.join(output_lines), filepath_findings, self.logger)
             else:
                 self.logger.success(f"[+] The domain functional level is {level_name}")
                 

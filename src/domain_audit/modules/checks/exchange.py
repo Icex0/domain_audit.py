@@ -69,14 +69,7 @@ class ExchangeChecker:
         self.logger.info("---Checking for Exchange servers---")
         
         try:
-            # Get members of Exchange Trusted Subsystem
-            members = self.ldap.query(
-                search_base=self.base_dn,
-                search_filter='(&(objectCategory=person)(objectClass=user)(memberOf=CN=Exchange Trusted Subsystem,*))',
-                attributes=['sAMAccountName', 'distinguishedName', 'lastLogonTimestamp']
-            )
-            
-            # Also check for computer objects that might be Exchange servers
+            # Check for computer objects in Exchange Trusted Subsystem
             computers = self.ldap.query(
                 search_base=self.base_dn,
                 search_filter='(&(objectClass=computer)(memberOf=CN=Exchange Trusted Subsystem,*))',
@@ -137,8 +130,13 @@ class ExchangeChecker:
             self.logger.error(f"[-] Error checking Exchange servers: {e}")
     
     def _check_exchange_permissions_group(self):
-        """Check Exchange Windows Permissions group membership."""
-        self.logger.info("---Checking for Exchange Windows permissions membership---")
+        """Check Exchange Windows Permissions group membership.
+        
+        This group typically has WriteDACL on the domain root, meaning any
+        member can grant themselves DCSync rights and compromise the entire
+        domain (PrivExchange / CVE-2019-1040 attack path).
+        """
+        self.logger.info("---Checking for Exchange Windows Permissions membership---")
         
         try:
             # Get members of Exchange Windows Permissions
@@ -149,31 +147,13 @@ class ExchangeChecker:
             )
             
             if members:
-                # Filter out Domain/Enterprise Admins
-                non_admins = []
-                for member in members:
-                    member_of = member.get('memberOf', [])
-                    if isinstance(member_of, str):
-                        member_of = [member_of]
-                    
-                    is_admin = any(
-                        'Domain Admins' in g or 'Enterprise Admins' in g 
-                        for g in member_of
-                    )
-                    
-                    if not is_admin:
-                        non_admins.append(member)
-                
-                if non_admins:
-                    self.logger.finding(
-                        f"[-] {len(non_admins)} users in Exchange Windows Permissions are not Domain/Enterprise Admins"
-                    )
-                    write_csv(
-                        non_admins, 
-                        self.output_paths['data'] / 'Exchange_memberships_ExchangeWindowsPermissions.txt'
-                    )
-                else:
-                    self.logger.success("[+] All Exchange Windows Permissions members are Domain/Enterprise Admins")
+                self.logger.finding(
+                    f"{len(members)} user(s) in Exchange Windows Permissions - this group typically has WriteDACL on the domain root (PrivExchange escalation path)"
+                )
+                write_csv(
+                    members, 
+                    self.output_paths['data'] / 'Exchange_memberships_ExchangeWindowsPermissions.txt'
+                )
             else:
                 self.logger.success("[+] There are no users in Exchange Windows Permissions")
                 
@@ -181,7 +161,12 @@ class ExchangeChecker:
             self.logger.error(f"[-] Error checking Exchange Windows Permissions: {e}")
     
     def _check_organization_management(self):
-        """Check Organization Management group membership."""
+        """Check Organization Management group membership.
+        
+        Organization Management has full control over the Exchange organization
+        and can manage Exchange Windows Permissions membership, providing an
+        indirect path to domain compromise via WriteDACL escalation.
+        """
         self.logger.info("---Checking for Organization Management membership---")
         
         try:
@@ -193,31 +178,13 @@ class ExchangeChecker:
             )
             
             if members:
-                # Filter out Domain/Enterprise Admins
-                non_admins = []
-                for member in members:
-                    member_of = member.get('memberOf', [])
-                    if isinstance(member_of, str):
-                        member_of = [member_of]
-                    
-                    is_admin = any(
-                        'Domain Admins' in g or 'Enterprise Admins' in g 
-                        for g in member_of
-                    )
-                    
-                    if not is_admin:
-                        non_admins.append(member)
-                
-                if non_admins:
-                    self.logger.finding(
-                        f"[-] {len(non_admins)} users in Organization Management are not Domain/Enterprise Admins"
-                    )
-                    write_csv(
-                        non_admins,
-                        self.output_paths['data'] / 'Exchange_memberships_OrganizationManagement.txt'
-                    )
-                else:
-                    self.logger.success("[+] All Organization Management members are Domain/Enterprise Admins")
+                self.logger.finding(
+                    f"{len(members)} user(s) in Organization Management - can manage Exchange group memberships and escalate to domain admin"
+                )
+                write_csv(
+                    members,
+                    self.output_paths['data'] / 'Exchange_memberships_OrganizationManagement.txt'
+                )
             else:
                 self.logger.success("[+] There are no users in Organization Management")
                 

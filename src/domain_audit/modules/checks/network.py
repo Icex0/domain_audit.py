@@ -269,7 +269,7 @@ class NetworkChecker:
             
             # Log what we found for debugging
             for host in hosts_alive:
-                self.logger.info(f"[*] {host.ip}: {sorted(host.open_ports)}")
+                self.logger.log_verbose(f"[*] {host.ip}: {sorted(host.open_ports)}")
             
             # Write results
             self._write_scan_results(hosts_alive, smb_hosts, winrm_hosts, rdp_hosts, mssql_hosts, http_hosts, https_hosts)

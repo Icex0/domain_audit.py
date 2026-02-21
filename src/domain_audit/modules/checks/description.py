@@ -87,8 +87,19 @@ class DescriptionChecker:
                 write_csv(groups, filepath)
                 
                 # Check for password-related keywords
+                # Exclude well-known default groups whose descriptions naturally
+                # contain password-related words
+                default_groups = {
+                    'allowed rodc password replication group',
+                    'denied rodc password replication group',
+                    'key admins',
+                    'enterprise key admins',
+                }
                 suspicious = []
                 for group in groups:
+                    name = group.get('sAMAccountName', '').lower()
+                    if name in default_groups:
+                        continue
                     desc = group.get('description', '').lower()
                     if any(kw in desc for kw in self.pass_keywords):
                         suspicious.append(group)

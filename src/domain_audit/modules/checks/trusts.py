@@ -181,14 +181,22 @@ class TrustChecker:
             issues = []
             
             # Check for inbound trusts (potential attack path)
-            if trust['direction_raw'] in [1, 3]:  # Inbound or Bidirectional
+            # Within-forest trusts (e.g. parent-child) are bidirectional by design
+            # and are not a finding - only flag external/cross-forest inbound trusts
+            attrs_raw = trust.get('attributes_raw', 0)
+            is_within_forest = bool(attrs_raw & 0x00000020)
+            if trust['direction_raw'] in [1, 3] and not is_within_forest:  # Inbound or Bidirectional
                 issues.append(f"Inbound trust - potential attack path from {trust['domain']}")
             
             # Check for SID filtering (quarantined)
-            attrs_raw = trust.get('attributes_raw', 0)
             if not (attrs_raw & 0x00000004):  # Not quarantined
                 if trust['direction_raw'] in [1, 3]:  # Inbound trusts
-                    issues.append("SID filtering NOT enabled - vulnerable to SID history injection")
+                    if is_within_forest:
+                        # Within-forest trusts have SID filtering disabled by design
+                        # (Microsoft enforces this) - not a finding
+                        pass
+                    else:
+                        issues.append("SID filtering NOT enabled - vulnerable to SID history injection")
             
             # Check for external trusts without quarantine
             if attrs_raw & 0x00000040:  # Treat as external

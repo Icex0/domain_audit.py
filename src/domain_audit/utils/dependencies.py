@@ -430,7 +430,7 @@ def check_and_set_dns(dc_ip: str, domain: str, cmd_args: list = None) -> bool:
     
     # Check if DC IP is already in DNS
     if dc_ip in current_dns:
-        logger.info(f"[+] DNS already configured with DC IP {dc_ip}")
+        logger.success(f"[+] DNS already configured with DC IP {dc_ip}")
         return True
     
     logger.warning(f"[!] DNS is not set to DC IP {dc_ip}")

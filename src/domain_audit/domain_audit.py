@@ -1,6 +1,7 @@
 """Domain Audit Tool - Main entry point."""
 
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -181,6 +182,10 @@ def _run_audit(
         logger.error("[-] Missing required option: --password / -p")
         raise typer.Exit(1)
     
+    # Record and display start time
+    start_time = datetime.now()
+    logger.success(f"[+] Domain audit started at {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
+
     # Check and set DNS to DC IP for proper hostname resolution
     logger.log_verbose("Checking DNS configuration")
     if not check_and_set_dns(server, domain, sys.argv):
@@ -266,7 +271,8 @@ def _run_audit(
         if success:
             logger.log_verbose(msg)
     
-    logger.success("\n\n[+] Domain audit completed")
+    end_time = datetime.now()
+    logger.success(f"\n\n[+] Domain audit completed at {end_time.strftime('%Y-%m-%d %H:%M:%S')}")
 
 
 def print_explanation(output_dir: Path):

@@ -1,6 +1,5 @@
 """Password policy security checks."""
 
-import configparser
 import io
 from typing import Dict
 from pathlib import Path
@@ -8,6 +7,7 @@ from pathlib import Path
 from ...utils.logger import get_logger
 from ...utils.ldap import LDAPConnection
 from ...utils.output import write_file, write_lines, write_csv
+from ...utils.gpttmpl import parse_gpttmpl_inf
 
 # Default Domain Policy GUID
 DEFAULT_DOMAIN_POLICY_GUID = "{31B2F340-016D-11D2-945F-00C04FB984F9}"
@@ -237,40 +237,21 @@ class PasswordChecker:
     def _parse_kerberos_policy(self, content: bytes) -> dict:
         """Parse Kerberos policy from GptTmpl.inf content."""
         policy = {}
+        parsed = parse_gpttmpl_inf(content)
         
-        try:
-            # Decode content (usually UTF-16 LE with BOM)
-            try:
-                text = content.decode('utf-16-le')
-            except UnicodeDecodeError:
-                try:
-                    text = content.decode('utf-16')
-                except UnicodeDecodeError:
-                    text = content.decode('utf-8', errors='ignore')
-            
-            # Remove BOM if present
-            if text.startswith('\ufeff'):
-                text = text[1:]
-            
-            # Parse as INI file
-            config = configparser.ConfigParser()
-            config.read_string(text)
-            
-            # Look for Kerberos Policy section
-            if 'Kerberos Policy' in config.sections():
-                for key, value in config.items('Kerberos Policy'):
-                    # Normalize key names (case-insensitive)
-                    key_normalized = key.replace(' ', '')
-                    for default_key in DEFAULT_KERBEROS_POLICY.keys():
-                        if key_normalized.lower() == default_key.lower():
-                            try:
-                                policy[default_key] = int(value)
-                            except ValueError:
-                                policy[default_key] = value
-                            break
-            
-        except Exception as e:
-            self.logger.debug(f"Error parsing GptTmpl.inf: {e}")
+        # configparser lowercases keys, so we need case-insensitive matching
+        # to map back to the canonical key names in DEFAULT_KERBEROS_POLICY
+        kerberos_section = parsed.get('Kerberos Policy', parsed.get('kerberos policy', {}))
+        
+        for key, value in kerberos_section.items():
+            key_normalized = key.replace(' ', '')
+            for default_key in DEFAULT_KERBEROS_POLICY.keys():
+                if key_normalized.lower() == default_key.lower():
+                    try:
+                        policy[default_key] = int(value)
+                    except ValueError:
+                        policy[default_key] = value
+                    break
         
         return policy
     

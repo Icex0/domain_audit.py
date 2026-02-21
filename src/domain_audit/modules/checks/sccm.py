@@ -27,7 +27,7 @@ class SCCMChecker:
         # The SCCM System Management container path
         sccm_container = f"CN=System Management,CN=System,{self.base_dn}"
         
-        self.logger.info(f"[*] Looking for the SCCM container with filter: '(distinguishedName={sccm_container})'")
+        self.logger.info(f"[*] Looking for SCCM container: {sccm_container}")
         
         try:
             # Query for the System Management container
@@ -38,7 +38,7 @@ class SCCMChecker:
             )
             
             if results:
-                self.logger.warning(f"[!] Found SCCM object: {sccm_container}")
+                self.logger.warning(f"[!] SCCM System Management container found")
                 
                 # Collect info (not a finding - SCCM itself is not a vulnerability)
                 info_lines = [

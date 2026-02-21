@@ -142,7 +142,8 @@ domain-audit --check adcs -d contoso.com -dc 10.0.0.1 -u admin -p 'Password123!'
 
 **Exchange**
 - Default Exchange group detection
-- Legacy Exchange permissions
+- Exchange Windows Permissions WriteDACL escalation path (PrivExchange)
+- Organization Management privilege escalation risk
 
 **Azure**
 - Azure AD Connect detection

@@ -94,6 +94,7 @@ class SQLChecker:
             write_lines(lines, self.output_paths['findings'] / 'mssql_impersonate_privs.txt')
         
         if encryption_disabled:
+            self.logger.info("---Checking for MSSQL without encryption---")
             self.logger.finding(f"Found {len(encryption_disabled)} MSSQL hosts with encryption disabled")
             write_lines(encryption_disabled, self.output_paths['findings'] / 'mssql_encryption_disabled.txt')
         

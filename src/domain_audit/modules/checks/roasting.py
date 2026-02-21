@@ -135,7 +135,7 @@ class RoastingChecker:
                         b'', b'', None, self.dc_ip
                     )
             except KerberosError as e:
-                self.logger.warning(f"[W] Failed to get TGT: {e}")
+                self.logger.warning(f"[!] Failed to get TGT: {e}")
                 return
             
             # Query for SPN users
@@ -253,7 +253,7 @@ class RoastingChecker:
             
             if hashes:
                 write_lines(hashes, output_file)
-                self.logger.warning(f"[W] Extracted {len(hashes)} AS-REP hashes")
+                self.logger.warning(f"[!] Extracted {len(hashes)} AS-REP hashes")
             else:
                 self.logger.info("[+] No AS-REP hashes extracted")
                 

@@ -1,6 +1,5 @@
 """NTLM security checks - NTLMv1 support and NTLM restriction policies."""
 
-import configparser
 import io
 import struct
 from typing import Dict, List, Optional
@@ -10,6 +9,7 @@ from ...utils.logger import get_logger
 from ...utils.ldap import LDAPConnection
 from ...utils.output import write_file, write_lines
 from ...utils.registry_pol import parse_pol_file
+from ...utils.gpttmpl import parse_gpttmpl_inf
 
 
 # LmCompatibilityLevel values and their meanings
@@ -834,41 +834,7 @@ class NTLMChecker:
         }
         return descriptions.get(value, f"Unknown ({value})")
     
-    def _parse_gpttmpl_inf(self, content: bytes) -> dict:
-        r"""Parse a GptTmpl.inf file and return a dict of section -> key -> value.
-        
-        GptTmpl.inf is a UTF-16LE INI file used by the Security Configuration Engine.
-        Security Options are stored under [Registry Values] as:
-          MACHINE\path\to\key\ValueName=Type,Data
-        where Type 4 = REG_DWORD.
-        """
-        result = {}
-        
-        try:
-            # Decode content (usually UTF-16 LE with BOM)
-            try:
-                text = content.decode('utf-16-le')
-            except UnicodeDecodeError:
-                try:
-                    text = content.decode('utf-16')
-                except UnicodeDecodeError:
-                    text = content.decode('utf-8', errors='ignore')
-            
-            # Remove BOM if present
-            if text.startswith('\ufeff'):
-                text = text[1:]
-            
-            # Parse as INI file
-            config = configparser.ConfigParser()
-            config.read_string(text)
-            
-            for section in config.sections():
-                result[section] = dict(config.items(section))
-                
-        except Exception as e:
-            self.logger.debug(f"Error parsing GptTmpl.inf: {e}")
-        
-        return result
+    # GptTmpl.inf parsing is handled by utils.gpttmpl.parse_gpttmpl_inf
     
     def _get_ntlm_settings_from_gpttmpl(self, conn) -> List[tuple]:
         """Get NTLM-related settings from GptTmpl.inf files in linked GPOs.
@@ -927,7 +893,7 @@ class NTLMChecker:
                 if not content:
                     continue
                 
-                parsed = self._parse_gpttmpl_inf(content)
+                parsed = parse_gpttmpl_inf(content)
                 
                 # Look in [Registry Values] section
                 registry_values = parsed.get('Registry Values', {})

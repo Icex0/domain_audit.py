@@ -105,9 +105,7 @@ class DCVulnsChecker:
                 cmd.extend(['-d', self.domain])
             
             self.logger.debug(f"[*] Running: {' '.join(cmd)}")
-            
-            self.logger.info("[*] Running netexec with nopac and zerologon modules...")
-            
+                        
             result = subprocess.run(
                 cmd,
                 capture_output=True,
