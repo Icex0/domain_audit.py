@@ -166,7 +166,8 @@ domain-audit --check adcs -d contoso.com -dc 10.0.0.1 -u admin -p 'Password123!'
 
 **NTLM Security**
 - NTLMv1 support detection (LmCompatibilityLevel 0/1/2 vulnerable to downgrade/relay attacks)
-- NTLM restriction policies (ideally NTLM disabled, Kerberos only)
+- NTLM restriction policies (RestrictNTLMInDomain, RestrictSendingNTLMTraffic, RestrictReceivingNTLMTraffic)
+- LLMNR enabled detection (vulnerable to Responder credential capture)
 
 **Network Services**
 - IP resolution and /24 range calculation
