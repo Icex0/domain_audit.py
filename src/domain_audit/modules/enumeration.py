@@ -34,13 +34,9 @@ class ADEnumerator:
     
     def enumerate_all(self) -> DomainData:
         """Run all enumeration tasks."""
-        self.logger.section("GATHERING DATA")
-        self.logger.info("Gathering data of all Users, Groups, Computerobjects, GPOs, OUs, DCs")
-        
         # Get domain SID first (needed for privileged group enumeration)
         self.logger.log_verbose("Gathering domain SID")
         domain_sid = self.get_domain_sid()
-        self.logger.info(f"Domain SID: {domain_sid}")
         
         # Enumerate all objects
         users = self.enumerate_users()
@@ -263,9 +259,14 @@ class ADEnumerator:
             attributes=['sAMAccountName', 'memberOf']
         )
     
-    def enumerate_privileged_group_members(self, domain_sid: str):
-        """Enumerate members of Domain Admins and Enterprise Admins groups."""
+    def enumerate_privileged_group_members(self, domain_sid: str) -> dict:
+        """Enumerate members of Domain Admins and Enterprise Admins groups.
+        
+        Returns:
+            Dict mapping group name to member count
+        """
         self.logger.log_verbose("Enumerating Domain Admins and Enterprise Admins members")
+        member_counts = {}
         
         # Well-known RIDs for privileged groups
         privileged_groups = {
@@ -325,11 +326,13 @@ class ADEnumerator:
                 
                 if usernames:
                     write_lines(usernames, filepath)
-                    self.logger.info(f"[*] Found {len(usernames)} members in {group_name}")
                 else:
                     # Write empty file if no members found
                     write_lines([], filepath)
-                    self.logger.info(f"[*] No members found in {group_name}")
+                member_counts[group_name] = len(usernames)
                     
             except Exception as e:
                 self.logger.error(f"[-] Error enumerating {group_name}: {e}")
+                member_counts[group_name] = 0
+        
+        return member_counts

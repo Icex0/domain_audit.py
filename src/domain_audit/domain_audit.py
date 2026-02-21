@@ -223,9 +223,6 @@ def _run_audit(
     # Print explanation
     print_explanation(paths["root"])
     
-    logger.section("EXECUTING CHECKS")
-    logger.info("Starting domain audit...")
-    
     # Setup LDAP connection for enumeration
     ldap_config = LDAPConfig(
         server=server,
@@ -299,6 +296,31 @@ def _print_domain_summary(domain_data, paths, domain, enumerator):
     """Print summary of domain enumeration."""
     logger = get_logger()
     
+    # Enumerate DA/EA members first (writes list files and returns counts)
+    member_counts = enumerator.enumerate_privileged_group_members(domain_data.domain_sid)
+    da_count = member_counts.get('Domain Admins', 0)
+    ea_count = member_counts.get('Enterprise Admins', 0)
+    
+    # Save basic lists (silently)
+    if domain_data.users:
+        users = [u.get('sAMAccountName', '') for u in domain_data.users if u.get('sAMAccountName')]
+        write_lines(sorted(users), paths['data'] / 'list_users.txt')
+        
+        enabled_users = [
+            u.get('sAMAccountName', '') for u in domain_data.users 
+            if u.get('sAMAccountName') and not (u.get('userAccountControl', 0) & 2)
+        ]
+        write_lines(sorted(enabled_users), paths['data'] / 'list_users_enabled.txt')
+    
+    if domain_data.computers:
+        computers = [c.get('dNSHostName', '') for c in domain_data.computers if c.get('dNSHostName')]
+        write_lines(sorted(computers), paths['data'] / 'list_computers.txt')
+    
+    if domain_data.groups:
+        groups = [g.get('sAMAccountName', '') for g in domain_data.groups if g.get('sAMAccountName')]
+        write_lines(sorted(groups), paths['data'] / 'list_groups.txt')
+    
+    # Print domain information
     logger.section("DOMAIN INFORMATION")
     
     user_count = len(domain_data.users)
@@ -316,34 +338,8 @@ def _print_domain_summary(domain_data, paths, domain, enumerator):
     logger.info(f"- {ou_count} OUs")
     logger.info(f"- {gpo_count} GPOs")
     logger.info(f"- {dc_count} Domain Controllers")
-    
-    # Save basic lists
-    logger.section("BASIC ENUMERATION")
-    
-    # User lists
-    if domain_data.users:
-        users = [u.get('sAMAccountName', '') for u in domain_data.users if u.get('sAMAccountName')]
-        write_lines(sorted(users), paths['data'] / 'list_users.txt')
-        
-        # Enabled users
-        enabled_users = [
-            u.get('sAMAccountName', '') for u in domain_data.users 
-            if u.get('sAMAccountName') and not (u.get('userAccountControl', 0) & 2)
-        ]
-        write_lines(sorted(enabled_users), paths['data'] / 'list_users_enabled.txt')
-    
-    # Computer list
-    if domain_data.computers:
-        computers = [c.get('dNSHostName', '') for c in domain_data.computers if c.get('dNSHostName')]
-        write_lines(sorted(computers), paths['data'] / 'list_computers.txt')
-    
-    # Group list
-    if domain_data.groups:
-        groups = [g.get('sAMAccountName', '') for g in domain_data.groups if g.get('sAMAccountName')]
-        write_lines(sorted(groups), paths['data'] / 'list_groups.txt')
-    
-    # Domain Admins and Enterprise Admins
-    enumerator.enumerate_privileged_group_members(domain_data.domain_sid)
+    logger.info(f"- {da_count} Domain Admins")
+    logger.info(f"- {ea_count} Enterprise Admins")
     
     logger.info("")
 
