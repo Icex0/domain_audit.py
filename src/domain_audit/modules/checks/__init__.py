@@ -54,6 +54,7 @@ AVAILABLE_CHECKS = {
     'ldap': ('LDAP security settings', 'ldap_checker', 'check_ldap'),
     'network': ('Network enumeration', 'network_checker', 'check_network'),
     'smb': ('SMB security checks', 'smb_checker', 'check_smb_access'),
+    'domain-admin-sessions': ('Domain admin sessions on non-DCs', 'smb_checker', 'check_domain_admin_sessions'),
     'access': ('Access checks (SMB/RDP/WINRM/MSSQL)', 'access_checker', 'check_access'),
     'sql': ('SQL Server enumeration', 'sql_checker', 'check_sql'),
     'wsus': ('WSUS HTTP configuration (MITM vulnerability)', 'wsus_checker', 'check_wsus'),
@@ -118,7 +119,9 @@ class SecurityChecker:
         self.sql_checker = SQLChecker(ldap_conn, output_paths,
                                        username=username, password=password, hashes=hashes)
         self.privileged_groups_checker = PrivilegedGroupsChecker(ldap_conn, output_paths)
-        self.smb_checker = SMBChecker(ldap_conn, output_paths, domain=domain)
+        self.smb_checker = SMBChecker(ldap_conn, output_paths, domain=domain,
+                                         username=username, password=password,
+                                         hashes=hashes)
         self.access_checker = AccessChecker(ldap_conn, output_paths,
                                              domain=domain, username=username,
                                              password=password, hashes=hashes)
@@ -187,6 +190,7 @@ class SecurityChecker:
         
         # SMB access checks (runs after network scan identifies SMB hosts)
         self.smb_checker.check_smb_access()
+        self.smb_checker.check_domain_admin_sessions()
         
         # Phase 12 checks
         self.logger.section("SECURITY CHECKS - PART 8")

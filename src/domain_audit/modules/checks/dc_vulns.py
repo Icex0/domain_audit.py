@@ -112,7 +112,7 @@ class DCVulnsChecker:
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=300
+                timeout=900  # 15 minute timeout for larger networks
             )
             
             output = result.stdout + result.stderr

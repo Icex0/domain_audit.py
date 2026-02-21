@@ -81,7 +81,7 @@ class BloodHoundChecker:
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=300,  # 5 minute timeout
+                timeout=900,  # 15 minute timeout for larger networks
                 cwd=str(bh_output)  # Set working directory to bloodhound folder
             )
             
