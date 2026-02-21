@@ -1,14 +1,14 @@
 # Domain Audit
 
-Active Directory security auditing tool. Python port of [`domain_audit.ps1`](https://github.com/0xJs/domain_audit).
+Active Directory security auditing tool. Python port of [`domain_audit.ps1`](https://github.com/0xJs/domain_audit) with additional checks and improvements.
 
 ## Requirements
 
 - Python 3.10+
 - Network access to target Domain Controller
-- Valid AD credentials (password or NTLM hash)
-- **netexec** - Install with: `pipx install git+https://github.com/Pennyw0rth/NetExec`
-- **certipy** - Install with: `pipx install certipy-ad`
+- Valid AD credentials
+- **netexec** - Install with: `pipx install --force git+https://github.com/Pennyw0rth/NetExec`
+- **certipy** - Install with: `pipx install --force certipy-ad`
 
 ## Installation
 
