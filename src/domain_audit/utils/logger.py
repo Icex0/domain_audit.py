@@ -38,7 +38,10 @@ class AuditLogger:
     
     def info(self, message: str):
         """White informational text."""
-        console.print(f"[white]{message}[/white]")
+        if message.startswith("---Checking"):
+            console.print(f"\n[white]{message}[/white]")
+        else:
+            console.print(f"[white]{message}[/white]")
     
     def success(self, message: str):
         """Dark green success message."""

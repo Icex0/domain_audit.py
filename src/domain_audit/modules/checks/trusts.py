@@ -89,7 +89,7 @@ class TrustChecker:
     
     def check_trusts(self):
         """Enumerate domain trusts."""
-        self.logger.info("---Enumerating domain trusts---")
+        self.logger.info("---Checking for domain trusts---")
         
         try:
             # Search for trustedDomain objects in System container
