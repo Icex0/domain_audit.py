@@ -398,24 +398,12 @@ class OutdatedChecker:
                 if isinstance(members, str):
                     members = [members]
                 
-                has_anonymous = False
-                has_authenticated_users = False
-                
                 for member in members:
-                    member_upper = member.upper()
-                    if 'S-1-5-7' in member or 'ANONYMOUS LOGON' in member_upper:
-                        has_anonymous = True
-                    if 'S-1-5-11' in member or 'AUTHENTICATED USERS' in member_upper:
-                        has_authenticated_users = True
-                
-                if has_anonymous:
-                    group_name = group.get('cn', group.get('distinguishedName', 'unknown'))
-                    self.logger.finding(f"ANONYMOUS LOGON is member of '{group_name}'")
-                    findings.append(f"{group_name}: ANONYMOUS LOGON (S-1-5-7)")
-                    
-                    if has_authenticated_users:
-                        self.logger.warning(f"[!] Authenticated Users is also member of '{group_name}' - unauthenticated users can enumerate domain data (user descriptions, password policy, etc.)")
-                        findings.append(f"{group_name}: Authenticated Users (S-1-5-11) - combined with ANONYMOUS LOGON allows unauthenticated domain enumeration")
+                    if 'S-1-5-7' in member or 'ANONYMOUS LOGON' in member.upper():
+                        group_name = group.get('cn', group.get('distinguishedName', 'unknown'))
+                        self.logger.finding(f"ANONYMOUS LOGON is member of '{group_name}'")
+                        findings.append(f"{group_name}: ANONYMOUS LOGON (S-1-5-7)")
+                        break
             
             if findings:
                 write_lines(findings, self.output_paths['findings'] / 'anonymous_logon_group_membership.txt')
