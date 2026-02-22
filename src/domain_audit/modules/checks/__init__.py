@@ -53,6 +53,7 @@ AVAILABLE_CHECKS = {
     'azure': ('Azure AD Connect', 'azure_checker', 'check_azure_ad_connect'),
     'sccm': ('SCCM/MECM configuration', 'sccm_checker', 'check_sccm'),
     'ldap': ('LDAP security settings', 'ldap_checker', 'check_ldap'),
+    'ldap-anonymous-bind': ('LDAP anonymous (unauthenticated) bind check', 'ldap_checker', '_check_ldap_anonymous_bind'),
     'network': ('Network enumeration', 'network_checker', 'check_network'),
     'smb': ('SMB security checks', 'smb_checker', 'check_smb_access'),
     'domain-admin-sessions': ('Domain admin sessions on non-DCs', 'smb_checker', 'check_domain_admin_sessions'),

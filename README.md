@@ -123,6 +123,7 @@ domain-audit --check adcs -d contoso.com -dc 10.0.0.1 -u admin -p 'Password123!'
 - Inactive computers and users (no logon in 6+ months)
 - End-of-life operating systems (Server 2008/2012, Windows 7/10 EOL builds)
 - Pre-Windows 2000 Compatible Access group membership
+- ANONYMOUS LOGON (S-1-5-7) group membership detection (warns when combined with Authenticated Users)
 - Pre-Windows 2000 computer password spraying list generation
 - Domain join permissions (ms-DS-MachineAccountQuota)
 
@@ -185,6 +186,7 @@ domain-audit --check adcs -d contoso.com -dc 10.0.0.1 -u admin -p 'Password123!'
 - PrintSpooler on Domain Controllers
 
 **LDAP Security**
+- LDAP anonymous bind detection (unauthenticated access to domain data)
 - LDAP signing requirements
 - LDAPS channel binding configuration
 

@@ -8,6 +8,8 @@ import re
 from typing import Dict, List
 from pathlib import Path
 
+import ldap3
+
 from impacket.dcerpc.v5 import transport, rprn
 
 from ...utils.logger import get_logger
@@ -33,11 +35,106 @@ class LDAPChecker:
     
     def check_ldap(self):
         """Run all LDAP and SYSVOL checks."""
+        self._check_ldap_anonymous_bind()
         self._check_ldap_signing()
         self._check_sysvol_passwords()
         self._check_netlogon_passwords()
         self._check_printspooler_dc()
     
+    def _check_ldap_anonymous_bind(self):
+        """Check whether each DC allows anonymous (unauthenticated) LDAP binds."""
+        self.logger.info("---Checking LDAP anonymous bind---")
+
+        try:
+            dcs = self.ldap.query(
+                search_base=self.base_dn,
+                search_filter='(&(objectClass=computer)(userAccountControl:1.2.840.113556.1.4.803:=8192))',
+                attributes=['dNSHostName', 'name']
+            )
+        except Exception as e:
+            self.logger.error(f"[-] Failed to query domain controllers: {e}")
+            dcs = []
+
+        if not dcs:
+            dcs = [{'dNSHostName': self.server, 'name': 'DC'}]
+
+        vulnerable_dcs = []
+
+        for dc in dcs:
+            hostname = dc.get('dNSHostName', '')
+            name = dc.get('name', '')
+
+            if not hostname:
+                continue
+
+            self.logger.info(f"[*] Testing anonymous LDAP bind on {name} ({hostname})")
+
+            try:
+                server = ldap3.Server(hostname, port=389, get_info=ldap3.NONE)
+                conn = ldap3.Connection(
+                    server,
+                    authentication=ldap3.ANONYMOUS,
+                    auto_bind=ldap3.AUTO_BIND_NONE,
+                    receive_timeout=10
+                )
+                bound = conn.bind()
+
+                if bound:
+                    # Windows AD always accepts an anonymous bind, so we must
+                    # verify whether the server actually allows querying
+                    # domain data.  rootDSE is always accessible anonymously
+                    # (RFC 4512), so we skip it and test real domain queries.
+                    anonymous_access = False
+
+                    # Try to read an actual domain object
+                    try:
+                        conn.search(
+                            search_base=self.base_dn,
+                            search_filter='(objectClass=domain)',
+                            search_scope=ldap3.BASE,
+                            attributes=['distinguishedName']
+                        )
+                        # ldap3 does not raise on operationsError, so check
+                        # the result code explicitly (0 = success)
+                        if conn.result.get('result') == 0 and conn.entries:
+                            anonymous_access = True
+                    except Exception:
+                        pass
+
+                    # Fallback: try enumerating users (single result)
+                    if not anonymous_access:
+                        try:
+                            conn.search(
+                                search_base=self.base_dn,
+                                search_filter='(objectClass=user)',
+                                search_scope=ldap3.SUBTREE,
+                                attributes=['sAMAccountName'],
+                                size_limit=1
+                            )
+                            if conn.result.get('result') == 0 and conn.entries:
+                                anonymous_access = True
+                        except Exception:
+                            pass
+
+                    if anonymous_access:
+                        self.logger.finding(f"Anonymous LDAP bind allowed on {name} ({hostname})")
+                        vulnerable_dcs.append(f"{name} ({hostname}): anonymous LDAP bind allowed")
+                    else:
+                        self.logger.success(f"[+] Anonymous LDAP bind denied on {name}")
+
+                else:
+                    self.logger.success(f"[+] Anonymous LDAP bind denied on {name}")
+
+                conn.unbind()
+
+            except Exception as e:
+                self.logger.debug(f"Anonymous bind check failed for {hostname}: {e}")
+                self.logger.warning(f"[!] Could not test anonymous bind on {name}: {e}")
+
+        if vulnerable_dcs:
+            write_lines(vulnerable_dcs,
+                        self.output_paths['findings'] / 'ldap_anonymous_bind.txt')
+
     def _check_ldap_signing(self):
         """Check LDAP signing and LDAPS channel binding using netexec."""
         self.logger.info("---Checking LDAP signing and LDAPS channel binding---")

@@ -28,6 +28,7 @@ class OutdatedChecker:
         self._check_krbtgt_password()
         self._check_domain_join()
         self._check_prewindows2000_group()
+        self._check_anonymous_logon_groups()
         self._check_prewindows2000_computers()
     
     def _check_outdated_computers(self):
@@ -374,6 +375,55 @@ class OutdatedChecker:
                 
         except Exception as e:
             self.logger.error(f"[-] Error checking Pre-Windows 2000 group: {e}")
+    
+    def _check_anonymous_logon_groups(self):
+        """Check if ANONYMOUS LOGON (S-1-5-7) is a member of any group."""
+        self.logger.info("---Checking ANONYMOUS LOGON group memberships---")
+        
+        try:
+            groups = self.ldap.query(
+                search_base=self.base_dn,
+                search_filter='(objectClass=group)',
+                attributes=['cn', 'distinguishedName', 'member']
+            )
+            
+            if not groups:
+                self.logger.info("[*] No groups found")
+                return
+            
+            findings = []
+            
+            for group in groups:
+                members = group.get('member') or []
+                if isinstance(members, str):
+                    members = [members]
+                
+                has_anonymous = False
+                has_authenticated_users = False
+                
+                for member in members:
+                    member_upper = member.upper()
+                    if 'S-1-5-7' in member or 'ANONYMOUS LOGON' in member_upper:
+                        has_anonymous = True
+                    if 'S-1-5-11' in member or 'AUTHENTICATED USERS' in member_upper:
+                        has_authenticated_users = True
+                
+                if has_anonymous:
+                    group_name = group.get('cn', group.get('distinguishedName', 'unknown'))
+                    self.logger.finding(f"ANONYMOUS LOGON is member of '{group_name}'")
+                    findings.append(f"{group_name}: ANONYMOUS LOGON (S-1-5-7)")
+                    
+                    if has_authenticated_users:
+                        self.logger.warning(f"[!] Authenticated Users is also member of '{group_name}' - unauthenticated users can enumerate domain data (user descriptions, password policy, etc.)")
+                        findings.append(f"{group_name}: Authenticated Users (S-1-5-11) - combined with ANONYMOUS LOGON allows unauthenticated domain enumeration")
+            
+            if findings:
+                write_lines(findings, self.output_paths['findings'] / 'anonymous_logon_group_membership.txt')
+            else:
+                self.logger.success("[+] ANONYMOUS LOGON is not a member of any group")
+                
+        except Exception as e:
+            self.logger.error(f"[-] Error checking ANONYMOUS LOGON group membership: {e}")
     
     def _check_prewindows2000_computers(self):
         """Generate lists for Pre-Windows 2000 computer password spraying."""
