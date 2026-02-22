@@ -9,6 +9,9 @@ from typing import Optional, List, Tuple
 
 from .logger import get_logger
 
+# Track which interface/service was modified so we only reset that one
+_modified_dns_info = {'service': None, 'interface_index': None, 'original_dns': None}
+
 
 def check_certipy_available() -> bool:
     """
@@ -181,58 +184,119 @@ def set_dns(dc_ip: str) -> Tuple[bool, str]:
 
 
 def _set_dns_windows(dc_ip: str) -> Tuple[bool, str]:
-    """Set DNS on Windows for all interfaces."""
+    """Set DNS on Windows for the active network adapter only."""
+    global _modified_dns_info
     try:
-        # Get all network adapters and set DNS for each
+        # Find the adapter with the default gateway (active adapter)
         result = subprocess.run(
-            ["powershell", "-Command", 
-             f"Get-DnsClientServerAddress -AddressFamily IPv4 | ForEach-Object {{ Set-DnsClientServerAddress -InterfaceIndex $_.InterfaceIndex -ServerAddresses '{dc_ip}' }}"],
-            capture_output=True, text=True, timeout=30
+            ["powershell", "-Command",
+             "Get-NetIPConfiguration | Where-Object { $_.IPv4DefaultGateway } | Select-Object -First 1 -ExpandProperty InterfaceIndex"],
+            capture_output=True, text=True, timeout=15
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            return False, "Could not determine active network adapter"
+        
+        iface_index = result.stdout.strip()
+        
+        # Save original DNS for this adapter before changing
+        orig_result = subprocess.run(
+            ["powershell", "-Command",
+             f"(Get-DnsClientServerAddress -InterfaceIndex {iface_index} -AddressFamily IPv4).ServerAddresses -join ','"],
+            capture_output=True, text=True, timeout=10
+        )
+        original_dns = orig_result.stdout.strip() if orig_result.returncode == 0 else None
+        
+        # Set DNS on the active adapter only
+        result = subprocess.run(
+            ["powershell", "-Command",
+             f"Set-DnsClientServerAddress -InterfaceIndex {iface_index} -ServerAddresses '{dc_ip}'"],
+            capture_output=True, text=True, timeout=15
         )
         if result.returncode == 0:
-            return True, f"DNS set to {dc_ip} for all interfaces"
+            # Get adapter name for logging
+            name_result = subprocess.run(
+                ["powershell", "-Command",
+                 f"(Get-NetAdapter -InterfaceIndex {iface_index}).Name"],
+                capture_output=True, text=True, timeout=10
+            )
+            adapter_name = name_result.stdout.strip() if name_result.returncode == 0 else f"index {iface_index}"
+            _modified_dns_info = {'interface_index': iface_index, 'original_dns': original_dns}
+            return True, f"DNS set to {dc_ip} on '{adapter_name}'"
         else:
             return False, f"Failed to set DNS: {result.stderr}"
     except Exception as e:
         return False, f"Error setting DNS: {e}"
 
 
-def _set_dns_macos(dc_ip: str) -> Tuple[bool, str]:
-    """Set DNS on macOS for all network services."""
+def _get_active_macos_service() -> Optional[str]:
+    """Determine the active macOS network service by checking the default route."""
     try:
-        # Get list of network services
+        # Get the interface used for the default route
         result = subprocess.run(
-            ["networksetup", "-listallnetworkservices"],
+            ["route", "get", "default"],
             capture_output=True, text=True, timeout=10
         )
         if result.returncode != 0:
-            return False, "Failed to list network services"
+            return None
         
-        services = []
-        for line in result.stdout.strip().split('\n'):
-            # Skip the header line and disabled services
-            if line and not line.startswith('*') and not line.startswith('An asterisk'):
-                services.append(line.strip())
+        # Parse interface name (e.g., "interface: en0")
+        match = re.search(r'interface:\s*(\S+)', result.stdout)
+        if not match:
+            return None
+        interface = match.group(1)
         
-        success_count = 0
-        for service in services:
-            try:
-                result = subprocess.run(
-                    ["networksetup", "-setdnsservers", service, dc_ip],
-                    capture_output=True, text=True, timeout=10
-                )
-                if result.returncode == 0:
-                    success_count += 1
-            except Exception:
-                continue
+        # Map the BSD interface (en0) to a network service name (Wi-Fi)
+        result = subprocess.run(
+            ["networksetup", "-listallhardwareports"],
+            capture_output=True, text=True, timeout=10
+        )
+        if result.returncode != 0:
+            return None
         
-        if success_count > 0:
+        # Parse output: "Hardware Port: Wi-Fi\nDevice: en0\n..."
+        current_service = None
+        for line in result.stdout.split('\n'):
+            if line.startswith('Hardware Port:'):
+                current_service = line.split(':', 1)[1].strip()
+            elif line.startswith('Device:'):
+                device = line.split(':', 1)[1].strip()
+                if device == interface:
+                    return current_service
+    except Exception:
+        pass
+    return None
+
+
+def _set_dns_macos(dc_ip: str) -> Tuple[bool, str]:
+    """Set DNS on macOS for the active network service only."""
+    global _modified_dns_info
+    try:
+        # Detect the active service
+        service = _get_active_macos_service()
+        
+        if not service:
+            return False, "Could not determine active network service"
+        
+        # Save original DNS for this service
+        orig_result = subprocess.run(
+            ["networksetup", "-getdnsservers", service],
+            capture_output=True, text=True, timeout=10
+        )
+        original_dns = orig_result.stdout.strip() if orig_result.returncode == 0 else None
+        
+        # Set DNS on the active service only
+        result = subprocess.run(
+            ["networksetup", "-setdnsservers", service, dc_ip],
+            capture_output=True, text=True, timeout=10
+        )
+        if result.returncode == 0:
             # Flush DNS cache
             subprocess.run(["dscacheutil", "-flushcache"], capture_output=True, timeout=10)
             subprocess.run(["killall", "-HUP", "mDNSResponder"], capture_output=True, timeout=10)
-            return True, f"DNS set to {dc_ip} for {success_count} network service(s)"
+            _modified_dns_info = {'service': service, 'original_dns': original_dns}
+            return True, f"DNS set to {dc_ip} on '{service}'"
         else:
-            return False, "Failed to set DNS for any network service"
+            return False, f"Failed to set DNS on '{service}': {result.stderr}"
     except Exception as e:
         return False, f"Error setting DNS: {e}"
 
@@ -328,15 +392,21 @@ def reset_dns() -> Tuple[bool, str]:
 
 
 def _reset_dns_windows() -> Tuple[bool, str]:
-    """Reset DNS on Windows to DHCP."""
+    """Reset DNS on Windows for the previously modified adapter."""
+    global _modified_dns_info
     try:
+        iface_index = _modified_dns_info.get('interface_index')
+        if not iface_index:
+            return False, "No adapter was modified by this tool"
+        
         result = subprocess.run(
             ["powershell", "-Command",
-             "Get-DnsClientServerAddress -AddressFamily IPv4 | ForEach-Object { Set-DnsClientServerAddress -InterfaceIndex $_.InterfaceIndex -ResetServerAddresses }"],
-            capture_output=True, text=True, timeout=30
+             f"Set-DnsClientServerAddress -InterfaceIndex {iface_index} -ResetServerAddresses"],
+            capture_output=True, text=True, timeout=15
         )
         if result.returncode == 0:
-            return True, "DNS reset to DHCP for all interfaces"
+            _modified_dns_info = {'service': None, 'interface_index': None, 'original_dns': None}
+            return True, "DNS reset to DHCP on the active adapter"
         else:
             return False, f"Failed to reset DNS: {result.stderr}"
     except Exception as e:
@@ -344,38 +414,24 @@ def _reset_dns_windows() -> Tuple[bool, str]:
 
 
 def _reset_dns_macos() -> Tuple[bool, str]:
-    """Reset DNS on macOS to automatic."""
+    """Reset DNS on macOS for the previously modified service."""
+    global _modified_dns_info
     try:
+        service = _modified_dns_info.get('service')
+        if not service:
+            return False, "No network service was modified by this tool"
+        
         result = subprocess.run(
-            ["networksetup", "-listallnetworkservices"],
+            ["networksetup", "-setdnsservers", service, "Empty"],
             capture_output=True, text=True, timeout=10
         )
-        if result.returncode != 0:
-            return False, "Failed to list network services"
-        
-        services = []
-        for line in result.stdout.strip().split('\n'):
-            if line and not line.startswith('*') and not line.startswith('An asterisk'):
-                services.append(line.strip())
-        
-        success_count = 0
-        for service in services:
-            try:
-                result = subprocess.run(
-                    ["networksetup", "-setdnsservers", service, "Empty"],
-                    capture_output=True, text=True, timeout=10
-                )
-                if result.returncode == 0:
-                    success_count += 1
-            except Exception:
-                continue
-        
-        if success_count > 0:
+        if result.returncode == 0:
             subprocess.run(["dscacheutil", "-flushcache"], capture_output=True, timeout=10)
             subprocess.run(["killall", "-HUP", "mDNSResponder"], capture_output=True, timeout=10)
-            return True, f"DNS reset to automatic for {success_count} network service(s)"
+            _modified_dns_info = {'service': None, 'interface_index': None, 'original_dns': None}
+            return True, f"DNS reset to automatic on '{service}'"
         else:
-            return False, "Failed to reset DNS for any network service"
+            return False, f"Failed to reset DNS on '{service}': {result.stderr}"
     except Exception as e:
         return False, f"Error resetting DNS: {e}"
 

@@ -112,6 +112,7 @@ class LAPSChecker:
                     write_lines([c.get('sAMAccountName', '') for c in laps_computers if c.get('sAMAccountName')], laps_file)
                     
                     # Check if the current user can read LAPS passwords (DA/delegated only)
+                    self.logger.info("---Checking if current user has permissions to read LAPS passwords---")
                     readable_passwords = [c for c in laps_computers if c.get('ms-Mcs-AdmPwd')]
                     if readable_passwords:
                         self.logger.finding("The current user could read LAPS passwords")
@@ -121,6 +122,7 @@ class LAPSChecker:
                     else:
                         self.logger.success("[+] The current user couldn't read any LAPS passwords")
                     
+                    self.logger.info("---Checking for computers without LAPS---")
                     if no_laps:
                         no_laps_file = self.output_paths['findings'] / 'laps_computers_disabled.txt'
                         self.logger.finding(f"There are {len(no_laps)} Windows systems where LAPS isn't enabled")

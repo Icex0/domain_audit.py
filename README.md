@@ -89,9 +89,10 @@ domain-audit --check adcs -d contoso.com -dc 10.0.0.1 -u admin -p 'Password123!'
 - Kerberos policy settings (ticket lifetime, encryption types)
 
 **LAPS**
+- Schema detection (Legacy LAPS vs Windows LAPS)
 - Deployment coverage across computer objects
-- Legacy LAPS vs Windows LAPS detection
-- GPO deployment check
+- Computers without LAPS enabled
+- LAPS password readability check (current user permissions)
 - LAPS policy configuration (AdminAccountName, PasswordComplexity, PasswordLength, PasswordAgeDays, PwdExpirationProtectionEnabled, AdmPwdEnabled)
 
 **Kerberos Attacks**
