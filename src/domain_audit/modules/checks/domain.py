@@ -56,7 +56,7 @@ class DomainChecker:
             # Level 0-6: Obsolete (Server 2012 R2 and older, all end-of-support) - finding
             # Level 7+:  Current (Server 2016/2019/2022/2025) - secure
             if level <= 6:
-                self.logger.finding(f"The domain functional level is {level_name} (obsolete)")
+                self.logger.finding(f"The domain functional level is {level_name}")
                 write_file('\n'.join(output_lines), filepath_findings, self.logger)
             else:
                 self.logger.success(f"[+] The domain functional level is {level_name}")

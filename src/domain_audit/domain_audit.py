@@ -308,7 +308,7 @@ def _print_domain_summary(domain_data, paths, domain, enumerator):
         
         enabled_users = [
             u.get('sAMAccountName', '') for u in domain_data.users 
-            if u.get('sAMAccountName') and not (u.get('userAccountControl', 0) & 2)
+            if u.get('sAMAccountName') and not ((u.get('userAccountControl') or 0) & 2)
         ]
         write_lines(sorted(enabled_users), paths['data'] / 'list_users_enabled.txt')
     

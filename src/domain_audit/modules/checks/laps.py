@@ -73,26 +73,45 @@ class LAPSChecker:
             
             # Check if LAPS schema is installed by probing for the attribute
             # in the schema partition, avoiding a noisy LDAP error on the main query
-            laps_installed = self._check_laps_schema()
+            laps_types = self._check_laps_schema()
             
-            if not laps_installed:
-                self.logger.finding("LAPS schema not installed (ms-Mcs-AdmPwd attribute not found)")
+            if not laps_types['legacy'] and not laps_types['windows']:
+                self.logger.finding("LAPS schema not installed (neither legacy nor Windows LAPS attributes found)")
                 findings_file = self.output_paths['findings'] / 'laps_notenabled.txt'
                 write_file("LAPS SCHEMA NOT INSTALLED", findings_file, self.logger)
             else:
+                # Build attribute list based on which LAPS schema is installed
+                # Only request attributes that exist to avoid LDAP errors
+                attrs = ['sAMAccountName', 'distinguishedName',
+                         'lastLogon', 'whenChanged', 'operatingSystem']
+                
+                if laps_types['legacy']:
+                    attrs.extend(['ms-Mcs-AdmPwd', 'ms-Mcs-AdmPwdExpirationTime'])
+                if laps_types['windows']:
+                    attrs.extend(['msLAPS-PasswordExpirationTime'])
+                
                 all_computers = self.ldap.query(
                     search_base=self.base_dn,
                     search_filter='(&(objectClass=computer)(operatingSystem=*Windows*))',
-                    attributes=['sAMAccountName', 'distinguishedName', 'ms-Mcs-AdmPwd', 'lastLogon', 'whenChanged', 'operatingSystem']
+                    attributes=attrs
                 )
-                laps_computers = [c for c in all_computers if c.get('ms-Mcs-AdmPwd')]
-                no_laps = [c for c in all_computers if not c.get('ms-Mcs-AdmPwd')]
+                
+                # Detect LAPS deployment via expiration time attributes (readable by any user)
+                laps_computers = [
+                    c for c in all_computers
+                    if c.get('ms-Mcs-AdmPwdExpirationTime') or c.get('msLAPS-PasswordExpirationTime')
+                ]
+                no_laps = [
+                    c for c in all_computers
+                    if not c.get('ms-Mcs-AdmPwdExpirationTime') and not c.get('msLAPS-PasswordExpirationTime')
+                ]
                 
                 if laps_computers:
                     count = len(laps_computers)
                     self.logger.success(f"[+] There are {count} systems where LAPS is enabled")
                     write_lines([c.get('sAMAccountName', '') for c in laps_computers if c.get('sAMAccountName')], laps_file)
                     
+                    # Check if the current user can read LAPS passwords (DA/delegated only)
                     readable_passwords = [c for c in laps_computers if c.get('ms-Mcs-AdmPwd')]
                     if readable_passwords:
                         self.logger.finding("The current user could read LAPS passwords")
@@ -283,18 +302,17 @@ class LAPSChecker:
         filepath = self.output_paths['findings'] / 'laps_policy.txt'
         write_file('\n'.join(policy_lines), filepath, self.logger)
     
-    def _check_laps_schema(self) -> bool:
-        """Check if the LAPS schema extension is installed.
+    def _check_laps_schema(self) -> dict:
+        """Check which LAPS schema extensions are installed.
         
-        Probes the AD schema for the ms-Mcs-AdmPwd attribute definition
-        rather than querying computers directly (which triggers noisy LDAP
-        errors when the attribute doesn't exist).
+        Probes the AD schema for ms-Mcs-AdmPwd (legacy LAPS) and
+        msLAPS-Password (Windows LAPS) attribute definitions.
         
         Returns:
-            True if LAPS schema (legacy ms-Mcs-AdmPwd) is installed.
+            Dict with 'legacy' and 'windows' booleans.
         """
+        result = {'legacy': False, 'windows': False}
         try:
-            # Query the schema partition for the LAPS attribute definition
             config_dn = f"CN=Schema,CN=Configuration,{self.base_dn}"
             try:
                 config_dn = f"CN=Schema,{self.ldap.get_config_dn()}"
@@ -303,9 +321,15 @@ class LAPSChecker:
             
             results = self.ldap.query(
                 search_base=config_dn,
-                search_filter='(lDAPDisplayName=ms-Mcs-AdmPwd)',
+                search_filter='(|(lDAPDisplayName=ms-Mcs-AdmPwd)(lDAPDisplayName=msLAPS-Password))',
                 attributes=['lDAPDisplayName']
             )
-            return len(results) > 0
+            for r in results:
+                attr_name = r.get('lDAPDisplayName', '')
+                if attr_name == 'ms-Mcs-AdmPwd':
+                    result['legacy'] = True
+                elif attr_name == 'msLAPS-Password':
+                    result['windows'] = True
         except Exception:
-            return False
+            pass
+        return result
