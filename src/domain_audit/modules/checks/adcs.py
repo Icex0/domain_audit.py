@@ -117,6 +117,8 @@ class ADCSChecker:
                     cmd,
                     capture_output=True,
                     text=True,
+                    encoding='utf-8',
+                    errors='replace',
                     cwd=tmpdir,
                     timeout=300
                 )

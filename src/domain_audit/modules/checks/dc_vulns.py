@@ -110,10 +110,12 @@ class DCVulnsChecker:
                 cmd,
                 capture_output=True,
                 text=True,
+                encoding='utf-8',
+                errors='replace',
                 timeout=900  # 15 minute timeout for larger networks
             )
             
-            output = result.stdout + result.stderr
+            output = (result.stdout or '') + (result.stderr or '')
             
             # Debug: raw netexec output
             self.logger.debug(f"netexec dc_vulns stdout:\n{result.stdout}")
@@ -143,18 +145,24 @@ class DCVulnsChecker:
         nopac_vulnerable = []
         errors = []
         
+        # Check the FULL output for known error patterns first.
+        # Rich/netexec may split error details across multiple lines,
+        # so per-line matching misses multi-line tracebacks.
+        if 'KRB_AP_ERR_SKEW' in output or 'Clock skew' in output:
+            errors.append("Kerberos clock skew (time synchronization issue)")
+        if 'KDC_ERR_C_PRINCIPAL_UNKNOWN' in output:
+            errors.append("Kerberos error: client principal unknown")
+        if 'KDC_ERR_PREAUTH_FAILED' in output:
+            errors.append("Kerberos error: pre-authentication failed")
+        
+        # Parse individual lines for vulnerability results
         for line in output.split('\n'):
             line = line.strip()
             if not line:
                 continue
             
-            # Check for errors in the output
-            if 'ERROR' in line or 'KerberosError' in line or 'SessionError' in line or 'Traceback' in line:
-                # Extract the error message if possible
-                if 'KRB_AP_ERR_SKEW' in line or 'Clock skew' in line:
-                    errors.append("Kerberos clock skew (time synchronization issue)")
-                elif 'KDC_ERR' in line:
-                    errors.append(f"Kerberos error: {line}")
+            # Skip error/traceback lines
+            if 'ERROR' in line or 'Traceback' in line:
                 continue
             
             # Extract IP from line
@@ -181,7 +189,7 @@ class DCVulnsChecker:
         if errors:
             errors = list(set(errors))  # Remove duplicates
             has_errors = True
-            self.logger.warning(f"[!] DC vulnerability check encountered errors (results incomplete):")
+            self.logger.warning("[!] DC vulnerability check encountered errors (results incomplete):")
             for error in errors:
                 self.logger.warning(f"    - {error}")
         

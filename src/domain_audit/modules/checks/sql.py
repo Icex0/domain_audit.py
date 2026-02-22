@@ -167,9 +167,11 @@ class SQLChecker:
                 cmd,
                 capture_output=True,
                 text=True,
+                encoding='utf-8',
+                errors='replace',
                 timeout=30
             )
-            return result.stdout + result.stderr
+            return (result.stdout or '') + (result.stderr or '')
         except Exception as e:
             self.logger.debug(f"netexec module {module} failed for {host}: {e}")
             return ""

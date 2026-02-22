@@ -80,10 +80,12 @@ class SMBChecker:
                 cmd,
                 capture_output=True,
                 text=True,
+                encoding='utf-8',
+                errors='replace',
                 timeout=900  # 15 minute timeout for larger networks
             )
             
-            output = result.stdout + result.stderr
+            output = (result.stdout or '') + (result.stderr or '')
             
             # Debug: raw netexec output (only with -v flag)
             self.logger.debug(f"netexec null session stdout:\n{result.stdout}")
@@ -153,10 +155,12 @@ class SMBChecker:
                 cmd,
                 capture_output=True,
                 text=True,
+                encoding='utf-8',
+                errors='replace',
                 timeout=900  # 15 minute timeout for larger networks
             )
             
-            output = result.stdout + result.stderr
+            output = (result.stdout or '') + (result.stderr or '')
             
             # Debug: raw netexec output (only with -v flag)
             self.logger.debug(f"netexec guest access stdout:\n{result.stdout}")
@@ -295,10 +299,12 @@ class SMBChecker:
                 cmd,
                 capture_output=True,
                 text=True,
+                encoding='utf-8',
+                errors='replace',
                 timeout=900  # 15 minute timeout for larger networks
             )
             
-            output = result.stdout + result.stderr
+            output = (result.stdout or '') + (result.stderr or '')
             
             # Strip ANSI color codes
             output = re.sub(r'\x1b\[[0-9;]*m', '', output)

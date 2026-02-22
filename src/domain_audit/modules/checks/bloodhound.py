@@ -80,11 +80,13 @@ class BloodHoundChecker:
                 cmd,
                 capture_output=True,
                 text=True,
+                encoding='utf-8',
+                errors='replace',
                 timeout=900,  # 15 minute timeout for larger networks
                 cwd=str(bh_output)  # Set working directory to bloodhound folder
             )
             
-            output = result.stdout + result.stderr
+            output = (result.stdout or '') + (result.stderr or '')
             
             if result.returncode == 0:
                 self.logger.success("[+] BloodHound collection completed successfully")

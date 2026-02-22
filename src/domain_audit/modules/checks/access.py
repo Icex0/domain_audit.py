@@ -100,9 +100,11 @@ class AccessChecker:
                 cmd,
                 capture_output=True,
                 text=True,
+                encoding='utf-8',
+                errors='replace',
                 timeout=timeout
             )
-            output = result.stdout + result.stderr
+            output = (result.stdout or '') + (result.stderr or '')
             
             # Strip ANSI color codes
             output = re.sub(r'\x1b\[[0-9;]*m', '', output)

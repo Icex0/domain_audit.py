@@ -189,6 +189,8 @@ class NetworkChecker:
                  '-iL', hosts_file, '-oG', '-'],
                 capture_output=True,
                 text=True,
+                encoding='utf-8',
+                errors='replace',
                 timeout=300
             )
             
@@ -520,6 +522,8 @@ class NetworkChecker:
                     cmd,
                     capture_output=True,
                     text=True,
+                    encoding='utf-8',
+                    errors='replace',
                     timeout=900  # 15 minute timeout for larger networks
                 )
                 
@@ -527,7 +531,7 @@ class NetworkChecker:
                 self.logger.debug(f"netexec webdav/ntlm_reflection stdout:\n{result.stdout}")
                 self.logger.debug(f"netexec webdav/ntlm_reflection stderr:\n{result.stderr}")
                 
-                output = result.stdout + result.stderr
+                output = (result.stdout or '') + (result.stderr or '')
                 
                 # Write all netexec output
                 write_lines(output.split('\n'), 

@@ -174,6 +174,8 @@ class LDAPChecker:
                     cmd,
                     capture_output=True,
                     text=True,
+                    encoding='utf-8',
+                    errors='replace',
                     timeout=60
                 )
                 
@@ -181,7 +183,7 @@ class LDAPChecker:
                 self.logger.debug(f"netexec ldap stdout:\n{result.stdout}")
                 self.logger.debug(f"netexec ldap stderr:\n{result.stderr}")
                 
-                output = result.stdout + result.stderr
+                output = (result.stdout or '') + (result.stderr or '')
                 
                 # Parse the banner line for signing and channel binding
                 # Example: (signing:None) (channel binding:Never)
