@@ -5,11 +5,10 @@ from pathlib import Path
 from datetime import datetime, timedelta
 
 from impacket.krb5.kerberosv5 import getKerberosTGT, getKerberosTGS
-from impacket.krb5.types import Principal, KerberosTime, Ticket
+from impacket.krb5.types import Principal, KerberosTime
 from impacket.krb5 import constants
 from impacket.krb5.asn1 import TGS_REP, AS_REQ, seq_set, seq_set_iter, AS_REP, KERB_PA_PAC_REQUEST, KRB_ERROR
 from impacket.krb5.kerberosv5 import sendReceive, KerberosError
-from impacket.krb5.ccache import CCache
 from pyasn1.codec.der import decoder, encoder
 from pyasn1.type.univ import noValue
 import socket

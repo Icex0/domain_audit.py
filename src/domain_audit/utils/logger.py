@@ -5,7 +5,6 @@ import sys
 from typing import Optional
 from rich.console import Console
 from rich.logging import RichHandler
-from rich.text import Text
 
 console = Console()
 
@@ -72,15 +71,7 @@ class AuditLogger:
         """Debug output only shown with -v flag."""
         if self.verbose:
             console.print(f"[dim white][D] {message}[/dim white]")
-    
-    def check_pass(self, message: str):
-        """Green check passed message."""
-        console.print(f"[green][+] {message}[/green]")
-    
-    def check_manual(self, message: str):
-        """Yellow manual check message."""
-        console.print(f"[yellow][?] {message}[/yellow]")
-    
+
     def write(self, message: str):
         """White write-to-file message."""
         console.print(f"[white][W] {message}[/white]")

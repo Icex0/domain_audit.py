@@ -18,16 +18,6 @@ class AceType(IntFlag):
     ACCESS_DENIED_OBJECT_ACE_TYPE = 0x06
 
 
-class AceFlags(IntFlag):
-    """ACE flags."""
-    OBJECT_INHERIT_ACE = 0x01
-    CONTAINER_INHERIT_ACE = 0x02
-    NO_PROPAGATE_INHERIT_ACE = 0x04
-    INHERIT_ONLY_ACE = 0x08
-    INHERITED_ACE = 0x10
-    SUCCESSFUL_ACCESS_ACE_FLAG = 0x40
-    FAILED_ACCESS_ACE_FLAG = 0x80
-
 
 class AccessMask(IntFlag):
     """Active Directory access rights."""
@@ -86,11 +76,7 @@ class SecurityDescriptor:
     owner_sid: str
     group_sid: str
     aces: List[ACE]
-    
-    def get_aces_for_sid(self, sid: str) -> List[ACE]:
-        """Get all ACEs for a specific SID."""
-        return [ace for ace in self.aces if ace.sid_string == sid]
-    
+
     def can_create_child(self, sid: str) -> bool:
         """Check if a SID has CreateChild permission."""
         # Check for explicit deny first

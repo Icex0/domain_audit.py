@@ -8,7 +8,7 @@ from typing import Optional
 import typer
 from typing_extensions import Annotated
 
-from .config import Config, DOMAIN_FUNCTIONAL_LEVELS, ADMIN_THRESHOLD_PERCENTAGE
+from .config import DOMAIN_FUNCTIONAL_LEVELS
 from .core.auth import Credentials, ADAuthManager
 from .core.exceptions import DomainAuditError
 from .utils.logger import get_logger, set_verbose

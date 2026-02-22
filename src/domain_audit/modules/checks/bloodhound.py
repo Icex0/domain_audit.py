@@ -1,7 +1,6 @@
 """BloodHound integration using netexec (BloodHound CE format)."""
 
 import subprocess
-import zipfile
 from typing import Dict
 from pathlib import Path
 
@@ -134,18 +133,3 @@ class BloodHoundChecker:
             self.logger.error(f"[-] Error running BloodHound: {e}")
             return False
     
-    def check_bloodhound_all(self):
-        """Run full BloodHound collection."""
-        return self.check_bloodhound(collection_method="all")
-    
-    def check_bloodhound_default(self):
-        """Run default BloodHound collection (faster, less data)."""
-        return self.check_bloodhound(collection_method="default")
-    
-    def check_bloodhound_sessions(self):
-        """Collect session data only."""
-        return self.check_bloodhound(collection_method="sessions")
-    
-    def check_bloodhound_acl(self):
-        """Collect ACL data only."""
-        return self.check_bloodhound(collection_method="acl")

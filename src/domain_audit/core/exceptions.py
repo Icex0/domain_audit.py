@@ -6,9 +6,6 @@ class DomainAuditError(Exception):
     pass
 
 
-class AuthenticationError(DomainAuditError):
-    """Raised when authentication fails."""
-    pass
 
 
 class ConnectionError(DomainAuditError):
@@ -20,17 +17,3 @@ class EnumerationError(DomainAuditError):
     """Raised when enumeration fails."""
     pass
 
-
-class CheckError(DomainAuditError):
-    """Raised when a security check fails."""
-    pass
-
-
-class ToolNotFoundError(DomainAuditError):
-    """Raised when a required external tool is not found."""
-    pass
-
-
-class OutputError(DomainAuditError):
-    """Raised when output operations fail."""
-    pass

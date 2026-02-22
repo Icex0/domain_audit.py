@@ -1,6 +1,6 @@
 """LDAP connection and query utilities."""
 
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional
 from dataclasses import dataclass
 
 # Workaround for MD4 being disabled in OpenSSL 3.0+
@@ -211,5 +211,5 @@ class LDAPConnection:
         self.connect()
         return self
     
-    def __exit__(self, exc_type, exc_val, exc_tb):
+    def __exit__(self, _exc_type, _exc_val, _exc_tb):
         self.disconnect()

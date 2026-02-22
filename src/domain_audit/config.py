@@ -113,30 +113,3 @@ NETLOGON_PASSWORD_KEYWORDS = [
     'ww',
     'authentication'
 ]
-
-
-@dataclass
-class Config:
-    """Application configuration."""
-    domain: str
-    server: str
-    username: str
-    password: str
-    output_directory: Optional[Path] = None
-    use_ldaps: bool = False
-    use_kerberos: bool = False
-    lm_hash: Optional[str] = None
-    nt_hash: Optional[str] = None
-    verbose: bool = False
-    skip_bloodhound: bool = False
-    skip_roasting: bool = False
-    
-    @property
-    def domain_fqdn(self) -> str:
-        """Return fully qualified domain name."""
-        return self.domain.lower()
-    
-    @property
-    def dc_host(self) -> str:
-        """Return DC host for connection string."""
-        return self.server

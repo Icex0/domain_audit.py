@@ -7,7 +7,7 @@ from pathlib import Path
 from ...utils.logger import get_logger
 from ...utils.ldap import LDAPConnection
 from ...utils.output import write_lines
-from ...utils.security_descriptor import parse_security_descriptor, WELL_KNOWN_SIDS
+from ...utils.security_descriptor import parse_security_descriptor
 from ...tools.powermad import ADIDNSEnumerator
 
 

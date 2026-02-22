@@ -8,9 +8,7 @@ import re
 from typing import Dict, List
 from pathlib import Path
 
-from impacket.dcerpc.v5 import transport, rprn, epm
-from impacket.dcerpc.v5.dtypes import NULL
-from impacket.dcerpc.v5.rpcrt import RPC_C_AUTHN_WINNT, RPC_C_AUTHN_LEVEL_PKT_PRIVACY
+from impacket.dcerpc.v5 import transport, rprn
 
 from ...utils.logger import get_logger
 from ...utils.ldap import LDAPConnection

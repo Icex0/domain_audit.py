@@ -6,11 +6,11 @@ from typing import Optional, Tuple
 
 from impacket.smbconnection import SMBConnection
 from impacket.krb5.kerberosv5 import KerberosError
-from ldap3 import Server, Connection, NTLM, SIMPLE, AUTO_BIND_NONE
+from ldap3 import Server, Connection, NTLM, AUTO_BIND_NONE
 from ldap3.core.exceptions import LDAPBindError, LDAPSocketOpenError
 
 from ..utils.logger import get_logger
-from .exceptions import AuthenticationError, ConnectionError
+from .exceptions import ConnectionError
 
 import socket
 
@@ -171,29 +171,7 @@ class ADAuthManager:
             self.logger.log_verbose(f"SMB auth failed: {e}")
             return False
     
-    def get_ldap_connection(self) -> Optional[Connection]:
-        """Get or create LDAP connection."""
-        if self.ldap_connection:
-            return self.ldap_connection
-        
-        try:
-            port = 636 if self.creds.use_ldaps else 389
-            server = Server(self.dc_ip, port=port, use_ssl=self.creds.use_ldaps, get_info='ALL')
-            
-            conn = Connection(
-                server,
-                user=self.creds.domain_username,
-                password=self.creds.password,
-                authentication=NTLM,
-                auto_bind=True
-            )
-            
-            self.ldap_connection = conn
-            return conn
-            
-        except Exception as e:
-            self.logger.error(f"Failed to establish LDAP connection: {e}")
-            raise ConnectionError(f"LDAP connection failed: {e}")
+
     
     def close(self):
         """Close all connections."""
@@ -210,23 +188,4 @@ class ADAuthManager:
                 pass
 
 
-def parse_hash(hash_string: str) -> Tuple[Optional[str], Optional[str]]:
-    """
-    Parse LM:NT or NT hash format.
-    
-    Args:
-        hash_string: Hash string in format LM:NT or just NT
-        
-    Returns:
-        Tuple of (lm_hash, nt_hash) or (None, None) if invalid
-    """
-    if not hash_string:
-        return None, None
-    
-    if ':' in hash_string:
-        parts = hash_string.split(':')
-        if len(parts) == 2:
-            return parts[0], parts[1]
-    
-    # Assume it's just the NT hash
-    return None, hash_string
+
