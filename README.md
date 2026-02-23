@@ -47,29 +47,29 @@ pip install .
 docker build -t domain-audit .
 
 # Run audit (results saved to ./results)
-docker run --rm -it -v $(pwd)/results:/data domain-audit -d contoso.com -dc 10.0.0.1 -u admin -p 'Password123!'
+docker run --rm -it -v $(pwd)/results:/data domain-audit -d contoso.com -dc 10.0.0.1 -u domainuser -p 'Password123!'
 ```
 
 ## Usage
 
 ```bash
 # Run full audit
-domain-audit -d contoso.com -dc 10.0.0.1 -u admin -p 'Password123!'
+domain-audit -d contoso.com -dc 10.0.0.1 -u domainuser -p 'Password123!'
 
 # Use LDAPS
-domain-audit -d contoso.com -dc 10.0.0.1 -u admin -p 'Password123!' --ldaps
+domain-audit -d contoso.com -dc 10.0.0.1 -u domainuser -p 'Password123!' --ldaps
 
 # Skip BloodHound collection
-domain-audit -d contoso.com -dc 10.0.0.1 -u admin -p 'Password123!' --skip-bloodhound
+domain-audit -d contoso.com -dc 10.0.0.1 -u domainuser -p 'Password123!' --skip-bloodhound
 
 # Skip Kerberoasting/AS-REP roasting
-domain-audit -d contoso.com -dc 10.0.0.1 -u admin -p 'Password123!' --skip-roasting
+domain-audit -d contoso.com -dc 10.0.0.1 -u domainuser -p 'Password123!' --skip-roasting
 
 # List available checks
 domain-audit -L
 
 # Run specific check
-domain-audit --check adcs -d contoso.com -dc 10.0.0.1 -u admin -p 'Password123!'
+domain-audit --check adcs -d contoso.com -dc 10.0.0.1 -u domainuser -p 'Password123!'
 ```
 
 ## What It Does
