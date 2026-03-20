@@ -309,7 +309,7 @@ class NetworkChecker:
             future_to_port = {}
             for host in hosts:
                 for port in self.DEFAULT_PORTS:
-                    future = executor.submit(self._check_port, host.ip, port, 0.5)
+                    future = executor.submit(self._check_port, host.ip, port, 1)
                     future_to_port[future] = (host, port)
             
             # Process results as they complete
