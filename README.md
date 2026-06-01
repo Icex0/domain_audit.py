@@ -229,3 +229,9 @@ contoso.com-20260201/
 ├── checks/      # Requires manual review (yellow)
 └── data/        # Raw enumeration data
 ```
+
+## TODO
+
+- [ ] Support Kerberos authentication
+- [ ] Better netexec error handling
+- [ ] Support more MSSQL checks from PowerUpSQL
