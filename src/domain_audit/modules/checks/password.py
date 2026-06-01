@@ -8,6 +8,7 @@ from ...utils.logger import get_logger
 from ...utils.ldap import LDAPConnection
 from ...utils.output import write_file, write_lines, write_csv
 from ...utils.gpttmpl import parse_gpttmpl_inf
+from ...utils.dc import select_reachable_dc
 
 # Default Domain Policy GUID
 DEFAULT_DOMAIN_POLICY_GUID = "{31B2F340-016D-11D2-945F-00C04FB984F9}"
@@ -139,7 +140,7 @@ class PasswordChecker:
                 self.logger.warning("[!] No domain controllers found, using configured server")
                 dc_hostname = self.server
             else:
-                dc_hostname = dcs[0].get('dNSHostName', self.server)
+                dc_hostname = select_reachable_dc(dcs, fallback=self.server, logger=self.logger)
             
             # Connect to SYSVOL
             conn = SMBConnection(dc_hostname, dc_hostname)

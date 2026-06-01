@@ -24,7 +24,9 @@ except ValueError:
     hashlib.new = _patched_hashlib_new
 
 from ldap3 import Server, Connection, NTLM, SUBTREE, ALL_ATTRIBUTES
-from ldap3.core.exceptions import LDAPBindError, LDAPSocketOpenError, LDAPException
+from ldap3.core.exceptions import (
+    LDAPBindError, LDAPSocketOpenError, LDAPException, LDAPCommunicationError
+)
 
 from ..utils.logger import get_logger
 from ..core.exceptions import ConnectionError, EnumerationError
@@ -98,6 +100,22 @@ class LDAPConnection:
             except:
                 pass
     
+    def _search_with_retry(self, **search_kwargs):
+        """Run an LDAP search, reconnecting once if the connection was dropped.
+
+        During a long audit the single LDAP connection can sit idle while
+        external tools run (BloodHound, port scans, netexec) and the DC closes
+        it server-side. The next write then fails with a broken-pipe/communication
+        error. We transparently rebind once and retry so late-running checks
+        don't spuriously report no results.
+        """
+        try:
+            self.connection.search(**search_kwargs)
+        except LDAPCommunicationError as e:
+            self.logger.log_verbose(f"LDAP connection lost ({e}); reconnecting and retrying")
+            self.connect()
+            self.connection.search(**search_kwargs)
+
     def query(self, search_base: str, search_filter: str, attributes: List[str] = None) -> List[Dict]:
         """
         Execute LDAP query.
@@ -115,8 +133,8 @@ class LDAPConnection:
         
         try:
             attrs = attributes if attributes else ALL_ATTRIBUTES
-            
-            self.connection.search(
+
+            self._search_with_retry(
                 search_base=search_base,
                 search_filter=search_filter,
                 search_scope=SUBTREE,
@@ -146,7 +164,7 @@ class LDAPConnection:
         
         try:
             # Query RootDSE - attributes are returned in allOperationalAttributes
-            self.connection.search(
+            self._search_with_retry(
                 search_base='',
                 search_filter='(objectClass=*)',
                 search_scope=0,  # BASE scope for RootDSE

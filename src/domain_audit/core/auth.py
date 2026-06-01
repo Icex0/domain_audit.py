@@ -10,24 +10,8 @@ from ldap3 import Server, Connection, NTLM, AUTO_BIND_NONE
 from ldap3.core.exceptions import LDAPBindError, LDAPSocketOpenError
 
 from ..utils.logger import get_logger
+from ..utils.dc import check_dc_reachable
 from .exceptions import ConnectionError
-
-import socket
-
-
-def check_dc_reachable(dc_ip: str, ports: list = [389, 636, 445, 88]) -> bool:
-    """Check if the domain controller is reachable on common AD ports."""
-    for port in ports:
-        try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(3)
-            result = sock.connect_ex((dc_ip, port))
-            sock.close()
-            if result == 0:
-                return True
-        except Exception:
-            continue
-    return False
 
 
 @dataclass

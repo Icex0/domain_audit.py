@@ -49,7 +49,7 @@ class WSUSChecker:
             conn.logoff()
             
             if not wsus_policies:
-                self.logger.info("[*] No WSUS policies found in SYSVOL")
+                self.logger.success("[+] No WSUS policies found in SYSVOL")
                 return
             
             # Categorize policies by scheme

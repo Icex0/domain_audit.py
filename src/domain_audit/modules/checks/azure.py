@@ -106,7 +106,7 @@ class AzureChecker:
                     'description': result.get('description', '')
                 })
                 self.logger.warning(f"[!] Found MSOL account: {username}")
-                self.logger.finding("MSOL accounts have DCSync privileges - extract credentials!")
+                self.logger.warning("[!] MSOL accounts have DCSync privileges by design (expected) - high-value target if the AAD Connect server is compromised")
                 
         except Exception as e:
             self.logger.error(f"[-] Error checking MSOL accounts: {e}")

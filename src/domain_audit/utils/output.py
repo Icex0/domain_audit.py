@@ -102,7 +102,13 @@ def write_csv(data: list, filepath: Path, headers: Optional[list] = None) -> boo
         with open(filepath, 'w', newline='', encoding='utf-8') as f:
             if data and isinstance(data[0], dict):
                 if headers is None:
+                    # Use the union of keys across all rows (preserving first-seen
+                    # order) so heterogeneous dicts don't trip DictWriter.
                     headers = list(data[0].keys())
+                    for row in data[1:]:
+                        for key in row.keys():
+                            if key not in headers:
+                                headers.append(key)
                 writer = csv.DictWriter(f, fieldnames=headers)
                 writer.writeheader()
                 writer.writerows(data)

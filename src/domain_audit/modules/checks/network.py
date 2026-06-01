@@ -500,12 +500,13 @@ class NetworkChecker:
                         f.write(f"{host.ip}\n")
                 hosts_file = f.name
             
-            # Run netexec with both webdav and ntlm_reflection modules (single command)
-            # netexec smb <hosts_file> -u user -p pass -d domain -M webdav -M ntlm_reflection
+            # Run netexec with both webdav and enum_cve modules (single command)
+            # netexec smb <hosts_file> -u user -p pass -d domain -M webdav -M enum_cve
+            # (enum_cve replaces the old ntlm_reflection module and reports several CVEs)
             try:
                 cmd = [
                     'netexec', 'smb', hosts_file,
-                    '-M', 'webdav', '-M', 'ntlm_reflection'
+                    '-M', 'webdav', '-M', 'enum_cve'
                 ]
                 
                 # Add credentials if available
@@ -528,14 +529,14 @@ class NetworkChecker:
                 )
                 
                 # Debug: raw netexec output
-                self.logger.debug(f"netexec webdav/ntlm_reflection stdout:\n{result.stdout}")
-                self.logger.debug(f"netexec webdav/ntlm_reflection stderr:\n{result.stderr}")
+                self.logger.debug(f"netexec webdav/enum_cve stdout:\n{result.stdout}")
+                self.logger.debug(f"netexec webdav/enum_cve stderr:\n{result.stderr}")
                 
                 output = (result.stdout or '') + (result.stderr or '')
                 
-                # Write all netexec output
-                write_lines(output.split('\n'), 
-                          self.output_paths['data'] / 'netexec_webdav_ntlm.txt')
+                # Write all netexec output (raw dump of both modules)
+                write_lines(output.split('\n'),
+                          self.output_paths['data'] / 'netexec_smb_modules.txt')
                 
                 # --- WebClient service check ---
                 self.logger.info("---Checking for WebClient service---")
@@ -557,22 +558,48 @@ class NetworkChecker:
                 else:
                     self.logger.success("[+] No systems have WebClient service running")
                 
-                # --- NTLM reflection check ---
-                self.logger.info("---Checking for NTLM reflection---")
-                
-                ntlm_reflection_hosts = []
+                # --- CVE enumeration (netexec enum_cve module, formerly ntlm_reflection) ---
+                # enum_cve can report any number of CVEs per host, and the set grows
+                # over time, so collect them generically rather than matching known IDs.
+                self.logger.info("---Checking hosts for known CVEs---")
+
+                import re
+                ip_pattern = r'\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b'
+                cve_id_pattern = r'CVE-\d{4}-\d+'
+
+                cve_lines = []              # full ENUM_CVE result lines (host + CVE + description)
+                ntlm_reflection_hosts = []  # hosts vulnerable to NTLM reflection (CVE-2025-33073)
                 for line in output.split('\n'):
-                    if line.startswith('NTLM_REF') and 'VULNERABLE' in line:
-                        import re
-                        ip_match = re.search(r'\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b', line)
+                    if not line.lstrip().startswith('ENUM_CVE') or 'CVE-' not in line:
+                        continue
+                    cve_lines.append(line.strip())
+                    # NTLM reflection (CVE-2025-33073) is also reported separately below
+                    if 'CVE-2025-33073' in line:
+                        ip_match = re.search(ip_pattern, line)
                         if ip_match:
                             ntlm_reflection_hosts.append(ip_match.group())
-                
+
+                cve_lines = sorted(set(cve_lines))
+
+                if cve_lines:
+                    unique_cves = sorted(set(
+                        m.group() for line in cve_lines
+                        if (m := re.search(cve_id_pattern, line))
+                    ))
+                    self.logger.finding(f"{len(cve_lines)} CVE finding(s) across hosts ({', '.join(unique_cves)})")
+                    for cve_line in cve_lines:
+                        self.logger.warning(f"[!] {cve_line}")
+                    write_lines(cve_lines,
+                               self.output_paths['findings'] / 'computers_cve.txt')
+                else:
+                    self.logger.success("[+] No known CVEs detected by enum_cve")
+
+                # --- NTLM reflection (kept as its own finding + file) ---
+                self.logger.info("---Checking for NTLM reflection---")
                 ntlm_reflection_hosts = sorted(set(ntlm_reflection_hosts))
-                
                 if ntlm_reflection_hosts:
-                    self.logger.finding(f"{len(ntlm_reflection_hosts)} systems vulnerable to NTLM reflection")
-                    write_lines(ntlm_reflection_hosts, 
+                    self.logger.finding(f"{len(ntlm_reflection_hosts)} systems vulnerable to NTLM reflection (CVE-2025-33073)")
+                    write_lines(ntlm_reflection_hosts,
                                self.output_paths['findings'] / 'computers_ntlm_reflection.txt')
                 else:
                     self.logger.success("[+] No systems vulnerable to NTLM reflection")
