@@ -55,6 +55,7 @@ AVAILABLE_CHECKS = {
     'ldap': ('LDAP security settings', 'ldap_checker', 'check_ldap'),
     'ldap-anonymous-bind': ('LDAP anonymous (unauthenticated) bind check', 'ldap_checker', '_check_ldap_anonymous_bind'),
     'network': ('Network enumeration', 'network_checker', 'check_network'),
+    'cve': ('CVE / NTLM reflection + WebClient (netexec enum_cve)', 'network_checker', 'check_webclient_cve'),
     'smb': ('SMB security checks', 'smb_checker', 'check_smb_access'),
     'domain-admin-sessions': ('Domain admin sessions on non-DCs', 'smb_checker', 'check_domain_admin_sessions'),
     'access': ('Access checks (SMB/RDP/WINRM/MSSQL)', 'access_checker', 'check_access'),

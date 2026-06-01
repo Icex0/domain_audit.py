@@ -476,6 +476,28 @@ class NetworkChecker:
             self.logger.error("[-] Impacket not available for SMB checks")
             self.logger.info("[*] Install impacket: pip install impacket")
     
+    def check_webclient_cve(self):
+        """Run the WebClient + enum_cve (CVE / NTLM reflection) check standalone.
+
+        Loads SMB hosts from the network scan output so this can run as an
+        individual --check without re-scanning. Requires a prior network scan
+        (same output dir/day) to have populated scandata_hostalive_smb.txt.
+        """
+        smb_file = self.output_paths['data'] / 'scandata_hostalive_smb.txt'
+        smb_ips = []
+        if smb_file.exists():
+            with open(smb_file, 'r') as f:
+                smb_ips = [line.strip() for line in f if line.strip()]
+
+        if not smb_ips:
+            self.logger.info("---Checking for WebClient service---")
+            self.logger.warning("[!] No SMB host data found - run '--check network' first (same output dir/day) or a full scan to populate hosts")
+            return
+
+        # Populate self.hosts so _check_webclient can filter on port 445
+        self.hosts = [HostInfo(hostname=ip, ip=ip, open_ports=[445]) for ip in smb_ips]
+        self._check_webclient()
+
     def _check_webclient(self):
         """Check for WebClient service and NTLM reflection on SMB hosts using netexec."""
         # Get SMB hosts
