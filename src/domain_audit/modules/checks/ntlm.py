@@ -186,7 +186,7 @@ class NTLMChecker:
             else:
                 # No explicit GPO settings found - check if OS defaults are vulnerable
                 if default_vulnerable:
-                    self.logger.finding("No LmCompatibilityLevel GPO - DCs running legacy OS with vulnerable defaults")
+                    self.logger.warning("[!] No LmCompatibilityLevel GPO found - DCs on legacy OS may use vulnerable defaults unless set via local GPO/registry/MDM (verify on host)")
                     
                     output_lines = [
                         "NTLMv1 Support (OS Default)",
@@ -360,7 +360,7 @@ class NTLMChecker:
                 # No restrictions enforced (either no settings or only audit)
                 if ntlm_restrictions:
                     self.logger.info("[*] NTLM audit settings found but no restrictions enforced")
-                self.logger.finding("NTLM is not restricted in the domain")
+                self.logger.warning("[!] No domain GPO restricts NTLM - may be unrestricted unless set via local GPO/registry/MDM (verify on host)")
                 
                 output_lines = [
                     "NTLM Not Restricted",
@@ -459,7 +459,7 @@ class NTLMChecker:
                           self.output_paths['checks'] / 'llmnr_disabled.txt',
                           self.logger)
             else:
-                self.logger.finding("LLMNR is not disabled via GPO - vulnerable to Responder attacks")
+                self.logger.warning("[!] No domain GPO disables LLMNR - vulnerable to Responder unless disabled via local GPO/registry/MDM (verify on host)")
                 
                 output_lines = [
                     "LLMNR Not Disabled",
