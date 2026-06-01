@@ -30,7 +30,22 @@ class OutdatedChecker:
         self._check_prewindows2000_group()
         self._check_anonymous_logon_groups()
         self._check_prewindows2000_computers()
-    
+
+    def check_privileged_accounts(self):
+        """Privileged account hardening: Protected Users / delegation flags,
+        privileged password age, and KRBTGT password age."""
+        self._check_privileged_objects()
+        self._check_privileged_old_passwords()
+        self._check_krbtgt_password()
+
+    def check_legacy(self):
+        """Legacy access & misconfiguration: Pre-Windows 2000 group/computers,
+        anonymous logon group membership, and who can join machines to the domain."""
+        self._check_prewindows2000_group()
+        self._check_prewindows2000_computers()
+        self._check_anonymous_logon_groups()
+        self._check_domain_join()
+
     def _check_outdated_computers(self):
         """Check for EOL operating systems in AD."""
         self.logger.info("---Checking for EOL operating systems---")
