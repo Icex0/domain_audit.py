@@ -215,7 +215,7 @@ class AccessChecker:
         
         hosts_file = self._get_hosts_file('scandata_hostalive_smb.txt')
         if not hosts_file:
-            self.logger.success("[+] Skipping SMB - no hosts")
+            self.logger.warning("[!] No SMB host data found - run '--check network' first (same output dir/day) or a full scan to populate hosts")
             return
         
         # Count hosts
@@ -244,7 +244,7 @@ class AccessChecker:
         
         hosts_file = self._get_hosts_file('scandata_hostalive_winrm.txt')
         if not hosts_file:
-            self.logger.success("[+] Skipping WinRM - no hosts")
+            self.logger.warning("[!] No WinRM host data found - run '--check network' first (same output dir/day) or a full scan to populate hosts")
             return
         
         # Count hosts
@@ -273,7 +273,7 @@ class AccessChecker:
         
         hosts_file = self._get_hosts_file('scandata_hostalive_rdp.txt')
         if not hosts_file:
-            self.logger.success("[+] Skipping RDP - no hosts")
+            self.logger.warning("[!] No RDP host data found - run '--check network' first (same output dir/day) or a full scan to populate hosts")
             return
         
         # Count hosts
@@ -346,7 +346,7 @@ class AccessChecker:
         
         hosts_file = self._get_hosts_file('scandata_hostalive_mssql.txt')
         if not hosts_file:
-            self.logger.success("[+] Skipping MSSQL - no hosts")
+            self.logger.warning("[!] No MSSQL host data found - run '--check network' first (same output dir/day) or a full scan to populate hosts")
             return
         
         # Count hosts

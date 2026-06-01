@@ -39,7 +39,7 @@ class SMBChecker:
             smb_hosts = self._load_smb_hosts()
         
         if not smb_hosts:
-            self.logger.info("[*] No SMB hosts to check for access")
+            self.logger.warning("[!] No SMB host data found - run '--check network' first (same output dir/day) or a full scan to populate SMB hosts")
             return
         
         self._check_null_session(smb_hosts)
@@ -252,7 +252,7 @@ class SMBChecker:
             smb_hosts = self._load_smb_hosts()
         
         if not smb_hosts:
-            self.logger.info("[*] No SMB hosts to check for domain admin sessions")
+            self.logger.warning("[!] No SMB host data found - run '--check network' first (same output dir/day) or a full scan to populate SMB hosts")
             return
         
         # Load domain admins

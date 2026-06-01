@@ -42,6 +42,7 @@ class DCVulnsChecker:
             return
         
         self.logger.info(f"[*] Checking {len(dc_ips)} Domain Controllers for vulnerabilities")
+        self.logger.info("[*] This can take some time; the check times out after 10 minutes")
         
         # Run netexec with both modules in single command
         self._run_vulnerability_check(dc_ips)
@@ -112,7 +113,7 @@ class DCVulnsChecker:
                 text=True,
                 encoding='utf-8',
                 errors='replace',
-                timeout=900  # 15 minute timeout for larger networks
+                timeout=600  # 10 minute timeout for the nopac/zerologon check
             )
             
             output = (result.stdout or '') + (result.stderr or '')
@@ -133,7 +134,7 @@ class DCVulnsChecker:
             os.unlink(hosts_file)
             
         except subprocess.TimeoutExpired:
-            self.logger.error("[-] DC vulnerability check timed out")
+            self.logger.error("[-] DC vulnerability check timed out after 10 minutes")
         except FileNotFoundError:
             self.logger.error("[-] netexec not found")
         except Exception as e:
