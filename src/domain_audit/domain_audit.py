@@ -3,7 +3,7 @@
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 import typer
 from typing_extensions import Annotated
@@ -14,6 +14,8 @@ from .core.exceptions import DomainAuditError
 from .utils.logger import get_logger, set_verbose
 from .utils.output import create_output_directory, write_lines
 from .utils.ldap import LDAPConnection, LDAPConfig
+from .utils.ip_exclusions import IPExclusions
+from .utils.targets import TargetScope
 from .utils.dependencies import check_and_set_dns, reset_dns, is_admin, check_netexec_available, check_certipy_available
 from .modules.enumeration import ADEnumerator
 from .modules.checks import SecurityChecker
@@ -38,6 +40,7 @@ def main(
     bloodhound_options: Annotated[str, typer.Option("--bloodhound-options", help="BloodHound collection method: all, default, sessions, acl, computer")] = "all",
     skip_roasting: Annotated[bool, typer.Option("--skip-roasting", help="Skip Kerberoast/AS-REP roast")] = False,
     use_ldaps: Annotated[bool, typer.Option("--ldaps", help="Use LDAPS instead of LDAP")] = False,
+    exclude_ip: Annotated[Optional[List[str]], typer.Option("--exclude-ip", help="Exclude IP/CIDR from non-DC host scanning. Can be repeated or comma-separated.")] = None,
     check: Annotated[Optional[str], typer.Option("--check", "-c", help="Run a specific check instead of full audit")] = None,
     list_checks: Annotated[bool, typer.Option("--list", "-L", help="List available checks")] = False,
 ):
@@ -74,14 +77,16 @@ def main(
         _run_check(
             check_name=check, domain=domain, server=server, username=username,
             password=password, output=output, verbose=verbose,
-            use_ldaps=use_ldaps, bloodhound_options=bloodhound_options
+            use_ldaps=use_ldaps, bloodhound_options=bloodhound_options,
+            exclude_ip=exclude_ip
         )
     else:
         _run_audit(
             domain=domain, server=server, username=username,
             password=password, output=output, verbose=verbose,
             skip_bloodhound=skip_bloodhound, bloodhound_options=bloodhound_options,
-            skip_roasting=skip_roasting, use_ldaps=use_ldaps
+            skip_roasting=skip_roasting, use_ldaps=use_ldaps,
+            exclude_ip=exclude_ip
         )
 
 
@@ -89,7 +94,8 @@ def _run_check(
     check_name: str, domain: str, server: str, username: str,
     password: Optional[str] = None,
     output: Optional[Path] = None, verbose: bool = False,
-    use_ldaps: bool = False, bloodhound_options: str = "all"
+    use_ldaps: bool = False, bloodhound_options: str = "all",
+    exclude_ip: Optional[List[str]] = None
 ):
     """Internal function to run a specific check."""
     logger = get_logger(verbose)
@@ -107,6 +113,8 @@ def _run_check(
     if not password:
         logger.error("[-] Missing required option: --password / -p")
         raise typer.Exit(1)
+
+    ip_exclusions = _parse_ip_exclusions(exclude_ip, logger)
     
     # Validate check name
     available = SecurityChecker.list_checks()
@@ -134,12 +142,16 @@ def _run_check(
     
     try:
         with LDAPConnection(ldap_config) as ldap_conn:
+            target_scope = TargetScope.from_ldap(
+                ldap_conn, ip_exclusions, logger, extra_targets=[server]
+            )
             checker = SecurityChecker(
                 ldap_conn, paths,
                 domain=domain,
                 username=username,
                 password=password,
-                bloodhound_options=bloodhound_options
+                bloodhound_options=bloodhound_options,
+                target_scope=target_scope
             )
             checker.run_check(check_name, bloodhound_options=bloodhound_options)
             
@@ -162,7 +174,8 @@ def _run_audit(
     password: Optional[str] = None,
     output: Optional[Path] = None, verbose: bool = False,
     skip_bloodhound: bool = False, bloodhound_options: str = "all",
-    skip_roasting: bool = False, use_ldaps: bool = False
+    skip_roasting: bool = False, use_ldaps: bool = False,
+    exclude_ip: Optional[List[str]] = None
 ):
     """Internal function to run the audit."""
     set_verbose(verbose)
@@ -181,6 +194,8 @@ def _run_audit(
     if not password:
         logger.error("[-] Missing required option: --password / -p")
         raise typer.Exit(1)
+
+    ip_exclusions = _parse_ip_exclusions(exclude_ip, logger)
     
     # Record and display start time
     start_time = datetime.now()
@@ -237,6 +252,10 @@ def _run_audit(
             # Run enumeration
             enumerator = ADEnumerator(ldap_conn, paths)
             domain_data = enumerator.enumerate_all()
+            target_scope = TargetScope.from_ldap(
+                ldap_conn, ip_exclusions, logger, domain_data.domain_controllers,
+                extra_targets=[server]
+            )
             
             # Print domain summary
             _print_domain_summary(domain_data, paths, domain, enumerator)
@@ -249,7 +268,8 @@ def _run_audit(
                 password=password,
                 bloodhound_options=bloodhound_options,
                 skip_bloodhound=skip_bloodhound,
-                skip_roasting=skip_roasting
+                skip_roasting=skip_roasting,
+                target_scope=target_scope
             )
             checker.run_all_checks()
             
@@ -270,6 +290,20 @@ def _run_audit(
     
     end_time = datetime.now()
     logger.success(f"\n\n[+] Domain audit completed at {end_time.strftime('%Y-%m-%d %H:%M:%S')}")
+
+
+def _parse_ip_exclusions(exclude_ip, logger) -> IPExclusions:
+    try:
+        ip_exclusions = IPExclusions.from_values(exclude_ip)
+    except ValueError as e:
+        logger.error(f"[-] {e}")
+        raise typer.Exit(1)
+
+    if not ip_exclusions:
+        return ip_exclusions
+
+    logger.info(f"[*] Excluding non-DC IP targets: {ip_exclusions.summary()}")
+    return ip_exclusions
 
 
 def print_explanation(output_dir: Path):

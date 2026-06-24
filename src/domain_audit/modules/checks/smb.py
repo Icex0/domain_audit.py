@@ -10,6 +10,7 @@ from pathlib import Path
 
 from ...utils.logger import get_logger
 from ...utils.ldap import LDAPConnection
+from ...utils.targets import TargetFiles, TargetScope
 from ...utils.output import write_lines
 
 
@@ -18,7 +19,7 @@ class SMBChecker:
     
     def __init__(self, ldap_conn: LDAPConnection, output_paths: Dict[str, Path],
                  domain: str = None, username: str = None, password: str = None,
-                 hashes: str = None):
+                 hashes: str = None, target_files: TargetFiles = None):
         self.ldap = ldap_conn
         self.output_paths = output_paths
         self.logger = get_logger()
@@ -26,6 +27,7 @@ class SMBChecker:
         self.username = username
         self.password = password
         self.hashes = hashes
+        self.target_files = target_files or TargetFiles(output_paths['data'], TargetScope(), self.logger)
     
     def check_smb_access(self, smb_hosts: List[str] = None):
         """Run SMB access checks on discovered hosts.
@@ -37,6 +39,8 @@ class SMBChecker:
         # Load SMB hosts from file if not provided
         if smb_hosts is None:
             smb_hosts = self._load_smb_hosts()
+        else:
+            smb_hosts = self._filter_hosts(smb_hosts)
         
         if not smb_hosts:
             self.logger.warning("[!] No SMB host data found - run '--check network' first (same output dir/day) or a full scan to populate SMB hosts")
@@ -47,11 +51,10 @@ class SMBChecker:
     
     def _load_smb_hosts(self) -> List[str]:
         """Load SMB hosts from scan data file."""
-        smb_file = self.output_paths['data'] / 'scandata_hostalive_smb.txt'
-        if smb_file.exists():
-            with open(smb_file, 'r') as f:
-                return [line.strip() for line in f if line.strip()]
-        return []
+        return self.target_files.read('scandata_hostalive_smb.txt', "SMB").targets
+
+    def _filter_hosts(self, hosts: List[str]) -> List[str]:
+        return self.target_files.filter_ips(hosts, "SMB").targets
     
     def _check_null_session(self, smb_hosts: List[str]):
         """Check for null/anonymous session access on SMB hosts using netexec."""
@@ -62,28 +65,23 @@ class SMBChecker:
             return
         
         try:
-            # Create temp file with SMB host IPs
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
-                for ip in smb_hosts:
-                    f.write(f"{ip}\n")
-                hosts_file = f.name
+            with self.target_files.temporary_targets(smb_hosts) as hosts_file:
+                self.logger.info(f"[*] Checking {len(smb_hosts)} SMB hosts for null session")
             
-            self.logger.info(f"[*] Checking {len(smb_hosts)} SMB hosts for null session")
+                # Run netexec with null credentials (empty username and password)
+                # netexec smb <targets> -u '' -p ''
+                cmd = ['netexec', 'smb', str(hosts_file), '-u', '', '-p', '']
             
-            # Run netexec with null credentials (empty username and password)
-            # netexec smb <targets> -u '' -p ''
-            cmd = ['netexec', 'smb', hosts_file, '-u', '', '-p', '']
+                self.logger.debug(f"[*] Running: {' '.join(cmd)}")
             
-            self.logger.debug(f"[*] Running: {' '.join(cmd)}")
-            
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                encoding='utf-8',
-                errors='replace',
-                timeout=900  # 15 minute timeout for larger networks
-            )
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    encoding='utf-8',
+                    errors='replace',
+                    timeout=900  # 15 minute timeout for larger networks
+                )
             
             output = (result.stdout or '') + (result.stderr or '')
             
@@ -122,11 +120,6 @@ class SMBChecker:
             self.logger.error("[-] netexec not found on system")
         except Exception as e:
             self.logger.error(f"[-] Error checking null session: {e}")
-        finally:
-            try:
-                os.unlink(hosts_file)
-            except Exception:
-                pass
     
     def _check_guest_access(self, smb_hosts: List[str]):
         """Check for guest account access on SMB hosts using netexec."""
@@ -137,28 +130,23 @@ class SMBChecker:
             return
         
         try:
-            # Create temp file with SMB host IPs
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
-                for ip in smb_hosts:
-                    f.write(f"{ip}\n")
-                hosts_file = f.name
+            with self.target_files.temporary_targets(smb_hosts) as hosts_file:
+                self.logger.info(f"[*] Checking {len(smb_hosts)} SMB hosts for guest access")
             
-            self.logger.info(f"[*] Checking {len(smb_hosts)} SMB hosts for guest access")
+                # Run netexec with guest credentials
+                # netexec smb <targets> -u 'guest' -p ''
+                cmd = ['netexec', 'smb', str(hosts_file), '-u', 'guest', '-p', '']
             
-            # Run netexec with guest credentials
-            # netexec smb <targets> -u 'guest' -p ''
-            cmd = ['netexec', 'smb', hosts_file, '-u', 'guest', '-p', '']
+                self.logger.debug(f"[*] Running: {' '.join(cmd)}")
             
-            self.logger.debug(f"[*] Running: {' '.join(cmd)}")
-            
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                encoding='utf-8',
-                errors='replace',
-                timeout=900  # 15 minute timeout for larger networks
-            )
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    encoding='utf-8',
+                    errors='replace',
+                    timeout=900  # 15 minute timeout for larger networks
+                )
             
             output = (result.stdout or '') + (result.stderr or '')
             
@@ -196,11 +184,6 @@ class SMBChecker:
             self.logger.error("[-] netexec not found on system")
         except Exception as e:
             self.logger.error(f"[-] Error checking guest access: {e}")
-        finally:
-            try:
-                os.unlink(hosts_file)
-            except Exception:
-                pass
     
     def _load_domain_admins(self) -> List[str]:
         """Load domain admins from data file."""
@@ -250,6 +233,8 @@ class SMBChecker:
         # Load SMB hosts from file if not provided
         if smb_hosts is None:
             smb_hosts = self._load_smb_hosts()
+        else:
+            smb_hosts = self._filter_hosts(smb_hosts)
         
         if not smb_hosts:
             self.logger.warning("[!] No SMB host data found - run '--check network' first (same output dir/day) or a full scan to populate SMB hosts")
@@ -265,16 +250,9 @@ class SMBChecker:
         dc_hostnames = self._load_domain_controllers()
         self.logger.debug(f"[*] Loaded {len(dc_hostnames)} domain controller hostnames")
         
-        hosts_file = None
         admins_file = None
         
         try:
-            # Create temp file with SMB host IPs
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
-                for ip in smb_hosts:
-                    f.write(f"{ip}\n")
-                hosts_file = f.name
-            
             # Create temp file with domain admin usernames
             with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
                 for admin in domain_admins:
@@ -282,27 +260,27 @@ class SMBChecker:
                 admins_file = f.name
             
             self.logger.info(f"[*] Checking {len(smb_hosts)} SMB hosts for domain admin sessions")
+            with self.target_files.temporary_targets(smb_hosts) as hosts_file:
+                # Build command: netexec smb <hosts> -u <user> -p <pass> --reg-sessions <admins>
+                cmd = ['netexec', 'smb', str(hosts_file), '-u', self.username]
             
-            # Build command: netexec smb <hosts> -u <user> -p <pass> --reg-sessions <admins>
-            cmd = ['netexec', 'smb', hosts_file, '-u', self.username]
+                if self.hashes and not self.password:
+                    cmd.extend(['-H', self.hashes])
+                else:
+                    cmd.extend(['-p', self.password if self.password else ''])
             
-            if self.hashes and not self.password:
-                cmd.extend(['-H', self.hashes])
-            else:
-                cmd.extend(['-p', self.password if self.password else ''])
+                cmd.extend(['--reg-sessions', admins_file])
             
-            cmd.extend(['--reg-sessions', admins_file])
+                self.logger.debug(f"[*] Running: {' '.join(cmd)}")
             
-            self.logger.debug(f"[*] Running: {' '.join(cmd)}")
-            
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                encoding='utf-8',
-                errors='replace',
-                timeout=900  # 15 minute timeout for larger networks
-            )
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    encoding='utf-8',
+                    errors='replace',
+                    timeout=900  # 15 minute timeout for larger networks
+                )
             
             output = (result.stdout or '') + (result.stderr or '')
             
@@ -396,7 +374,7 @@ class SMBChecker:
             self.logger.error(f"[-] Error checking domain admin sessions: {e}")
         finally:
             # Clean up temp files
-            for f in [hosts_file, admins_file]:
+            for f in [admins_file]:
                 if f:
                     try:
                         os.unlink(f)

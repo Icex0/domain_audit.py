@@ -5,6 +5,7 @@ from pathlib import Path
 
 from ...utils.logger import get_logger
 from ...utils.ldap import LDAPConnection
+from ...utils.targets import TargetFiles, TargetScope
 from .domain import DomainChecker
 from .password import PasswordChecker
 from .laps import LAPSChecker
@@ -74,7 +75,8 @@ class SecurityChecker:
     def __init__(self, ldap_conn: LDAPConnection, output_paths: Dict[str, Path],
                  domain: str = None, username: str = None, password: str = None,
                  hashes: str = None, bloodhound_options: str = "all",
-                 skip_bloodhound: bool = False, skip_roasting: bool = False):
+                 skip_bloodhound: bool = False, skip_roasting: bool = False,
+                 target_scope: TargetScope = None):
         self.ldap = ldap_conn
         self.output_paths = output_paths
         self.logger = get_logger()
@@ -85,6 +87,13 @@ class SecurityChecker:
         self.bloodhound_options = bloodhound_options
         self.skip_bloodhound = skip_bloodhound
         self.skip_roasting = skip_roasting
+        self.target_scope = target_scope or TargetScope.from_ldap(
+            ldap_conn,
+            None,
+            self.logger,
+            extra_targets=[ldap_conn.config.server],
+        )
+        self.target_files = TargetFiles(output_paths['data'], self.target_scope, self.logger)
         
         # Initialize sub-checkers
         self.domain_checker = DomainChecker(ldap_conn, output_paths)
@@ -113,7 +122,9 @@ class SecurityChecker:
                                          password=password, hashes=hashes)
         self.network_checker = NetworkChecker(ldap_conn, output_paths, server=ldap_conn.config.server,
                                               domain=domain, username=username,
-                                              password=password, hashes=hashes)
+                                              password=password, hashes=hashes,
+                                              target_scope=self.target_scope,
+                                              target_files=self.target_files)
         self.ldap_checker = LDAPChecker(ldap_conn, output_paths, server=ldap_conn.config.server,
                                          username=username, password=password, domain=domain)
         self.trust_checker = TrustChecker(ldap_conn, output_paths)
@@ -123,14 +134,18 @@ class SecurityChecker:
                                                      domain=domain, username=username,
                                                      password=password, hashes=hashes)
         self.sql_checker = SQLChecker(ldap_conn, output_paths,
-                                       username=username, password=password, hashes=hashes)
+                                       username=username, password=password, hashes=hashes,
+                                       target_scope=self.target_scope,
+                                       target_files=self.target_files)
         self.privileged_groups_checker = PrivilegedGroupsChecker(ldap_conn, output_paths)
         self.smb_checker = SMBChecker(ldap_conn, output_paths, domain=domain,
                                          username=username, password=password,
-                                         hashes=hashes)
+                                         hashes=hashes,
+                                         target_files=self.target_files)
         self.access_checker = AccessChecker(ldap_conn, output_paths,
                                              domain=domain, username=username,
-                                             password=password, hashes=hashes)
+                                             password=password, hashes=hashes,
+                                             target_files=self.target_files)
         self.wsus_checker = WSUSChecker(ldap_conn, output_paths,
                                          server=ldap_conn.config.server,
                                          domain=domain, username=username,
@@ -147,6 +162,7 @@ class SecurityChecker:
         """Run all Phase 4 and 5 security checks."""
         # BloodHound collection first (before any other checks)
         if not self.skip_bloodhound:
+            self._warn_if_bloodhound_cannot_enforce_exclusions()
             self.bloodhound_checker.check_bloodhound(self.bloodhound_options)
         
         self.logger.section("SECURITY CHECKS - PART 1")
@@ -238,6 +254,7 @@ class SecurityChecker:
         
         # Special handling for bloodhound which needs options
         if check_name == 'bloodhound':
+            self._warn_if_bloodhound_cannot_enforce_exclusions()
             method(kwargs.get('bloodhound_options', 'all'))
         else:
             method()
@@ -248,6 +265,13 @@ class SecurityChecker:
     def list_checks() -> Dict[str, str]:
         """Return dict of available check names and descriptions."""
         return {name: info[0] for name, info in AVAILABLE_CHECKS.items()}
+
+    def _warn_if_bloodhound_cannot_enforce_exclusions(self):
+        if self.target_scope.has_non_dc_exclusions():
+            self.logger.warning(
+                "[!] --exclude-ip is not enforced for BloodHound because netexec "
+                "does not expose a BloodHound target exclusion flag"
+            )
 
 
 __all__ = [

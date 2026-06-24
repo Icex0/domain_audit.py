@@ -4,14 +4,15 @@ import socket
 import subprocess
 import shutil
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional
 from pathlib import Path
 from dataclasses import dataclass
 import ipaddress
 
 from ...utils.logger import get_logger
 from ...utils.ldap import LDAPConnection
-from ...utils.output import write_lines, write_csv
+from ...utils.targets import TargetFiles, TargetScope
+from ...utils.output import write_lines
 
 
 @dataclass
@@ -36,7 +37,9 @@ class NetworkChecker:
     
     def __init__(self, ldap_conn: LDAPConnection, output_paths: Dict[str, Path], 
                  server: str = None, domain: str = None, username: str = None,
-                 password: str = None, hashes: str = None):
+                 password: str = None, hashes: str = None,
+                 target_scope: TargetScope = None,
+                 target_files: TargetFiles = None):
         self.ldap = ldap_conn
         self.output_paths = output_paths
         self.logger = get_logger()
@@ -46,6 +49,8 @@ class NetworkChecker:
         self.username = username
         self.password = password
         self.hashes = hashes
+        self.target_scope = target_scope or TargetScope()
+        self.target_files = target_files or TargetFiles(output_paths['data'], self.target_scope, self.logger)
         self.hosts: List[HostInfo] = []
     
     def check_network(self):
@@ -74,6 +79,7 @@ class NetworkChecker:
             # Resolve IPs for each host
             host_ip_map = []
             ips = []
+            excluded_count = 0
             
             for comp in computers:
                 hostname = comp.get('dNSHostName', '')
@@ -82,6 +88,10 @@ class NetworkChecker:
                 
                 ip = self._dns_resolve(hostname)
                 if ip:
+                    if self.target_scope.excludes_ip(ip):
+                        excluded_count += 1
+                        self.logger.log_verbose(f"[*] Excluding {hostname} ({ip}) from network scan")
+                        continue
                     host_ip_map.append(f"{hostname}: {ip}")
                     ips.append(ip)
                     self.hosts.append(HostInfo(hostname=hostname, ip=ip))
@@ -102,6 +112,8 @@ class NetworkChecker:
             self._calculate_ip_ranges(ips)
             
             self.logger.info(f"[*] Resolved IPs for {len(ips)} hosts")
+            if excluded_count:
+                self.logger.info(f"[*] Excluded {excluded_count} host(s) by --exclude-ip")
             
         except Exception as e:
             self.logger.error(f"[-] Error resolving host IPs: {e}")
@@ -151,7 +163,7 @@ class NetworkChecker:
             return
         
         # Filter hosts with IPs
-        hosts_with_ips = [h for h in self.hosts if h.ip]
+        hosts_with_ips = [h for h in self.hosts if h.ip and not self.target_scope.excludes_ip(h.ip)]
         
         if not hosts_with_ips:
             self.logger.info("[*] No hosts with resolved IPs to scan")
@@ -168,15 +180,7 @@ class NetworkChecker:
     def _scan_with_nmap(self, hosts: List[HostInfo]):
         """Use nmap for fast port scanning."""
         try:
-            # Create temp file with target IPs
-            import tempfile
-            import os
             import re
-            
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
-                for host in hosts:
-                    f.write(f"{host.ip}\n")
-                hosts_file = f.name
             
             # Build port list
             ports_str = ','.join(map(str, self.DEFAULT_PORTS))
@@ -184,18 +188,16 @@ class NetworkChecker:
             # Run nmap with connect scan (-sT) - SYN scan requires root
             self.logger.info(f"[*] Running nmap against {len(hosts)} host(s)")
             
-            result = subprocess.run(
-                ['nmap', '-Pn', '-n', '-sT', '-p', ports_str, 
-                 '-iL', hosts_file, '-oG', '-'],
-                capture_output=True,
-                text=True,
-                encoding='utf-8',
-                errors='replace',
-                timeout=300
-            )
-            
-            # Clean up temp file
-            os.unlink(hosts_file)
+            with self.target_files.temporary_targets([host.ip for host in hosts]) as hosts_file:
+                result = subprocess.run(
+                    ['nmap', '-Pn', '-n', '-sT', '-p', ports_str,
+                     '-iL', str(hosts_file), '-oG', '-'],
+                    capture_output=True,
+                    text=True,
+                    encoding='utf-8',
+                    errors='replace',
+                    timeout=300
+                )
             
             # Check for errors
             if result.returncode != 0:
@@ -484,10 +486,7 @@ class NetworkChecker:
         (same output dir/day) to have populated scandata_hostalive_smb.txt.
         """
         smb_file = self.output_paths['data'] / 'scandata_hostalive_smb.txt'
-        smb_ips = []
-        if smb_file.exists():
-            with open(smb_file, 'r') as f:
-                smb_ips = [line.strip() for line in f if line.strip()]
+        smb_ips = self.target_files.read(smb_file, "SMB").targets
 
         if not smb_ips:
             self.logger.info("---Checking for WebClient service---")
@@ -510,24 +509,13 @@ class NetworkChecker:
             self.logger.info("[*] No SMB hosts to check for NTLM reflection")
             return
         
-        # Write SMB hosts to temp file for netexec
-        import tempfile
-        import os
-        
         try:
-            # Create temp file with SMB host IPs
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
-                for host in smb_hosts:
-                    if host.ip:
-                        f.write(f"{host.ip}\n")
-                hosts_file = f.name
-            
-            # Run netexec with both webdav and enum_cve modules (single command)
-            # netexec smb <hosts_file> -u user -p pass -d domain -M webdav -M enum_cve
-            # (enum_cve replaces the old ntlm_reflection module and reports several CVEs)
-            try:
+            with self.target_files.temporary_targets([h.ip for h in smb_hosts if h.ip]) as hosts_file:
+                # Run netexec with both webdav and enum_cve modules (single command)
+                # netexec smb <hosts_file> -u user -p pass -d domain -M webdav -M enum_cve
+                # (enum_cve replaces the old ntlm_reflection module and reports several CVEs)
                 cmd = [
-                    'netexec', 'smb', hosts_file,
+                    'netexec', 'smb', str(hosts_file),
                     '-M', 'webdav', '-M', 'enum_cve'
                 ]
                 
@@ -541,14 +529,21 @@ class NetworkChecker:
                 
                 self.logger.debug(f"[*] Running: {' '.join(cmd)}")
                 
-                result = subprocess.run(
-                    cmd,
-                    capture_output=True,
-                    text=True,
-                    encoding='utf-8',
-                    errors='replace',
-                    timeout=900  # 15 minute timeout for larger networks
-                )
+                try:
+                    result = subprocess.run(
+                        cmd,
+                        capture_output=True,
+                        text=True,
+                        encoding='utf-8',
+                        errors='replace',
+                        timeout=900  # 15 minute timeout for larger networks
+                    )
+                except subprocess.TimeoutExpired:
+                    self.logger.error("[-] netexec timed out after 5 minutes")
+                    return
+                except FileNotFoundError:
+                    self.logger.error("[-] netexec not found on system")
+                    return
                 
                 # Debug: raw netexec output
                 self.logger.debug(f"netexec webdav/enum_cve stdout:\n{result.stdout}")
@@ -626,20 +621,5 @@ class NetworkChecker:
                 else:
                     self.logger.success("[+] No systems vulnerable to NTLM reflection")
                     
-            except subprocess.TimeoutExpired:
-                self.logger.error("[-] netexec timed out after 5 minutes")
-            except FileNotFoundError:
-                self.logger.error("[-] netexec not found on system")
-            except Exception as e:
-                self.logger.error(f"[-] Error running netexec: {e}")
-            
-            finally:
-                # Clean up temp file
-                try:
-                    os.unlink(hosts_file)
-                except Exception:
-                    pass
-                    
         except Exception as e:
             self.logger.error(f"[-] Error checking WebClient/NTLM reflection: {e}")
-

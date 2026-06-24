@@ -1,14 +1,13 @@
 """Access checks using netexec for SMB, RDP, WINRM, and MSSQL."""
 
-import os
 import re
 import subprocess
-import tempfile
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 
 from ...utils.logger import get_logger
 from ...utils.ldap import LDAPConnection
+from ...utils.targets import TargetFiles, TargetScope
 from ...utils.output import write_lines
 
 
@@ -17,7 +16,7 @@ class AccessChecker:
     
     def __init__(self, ldap_conn: LDAPConnection, output_paths: Dict[str, Path],
                  domain: str = None, username: str = None, password: str = None,
-                 hashes: str = None):
+                 hashes: str = None, target_files: TargetFiles = None):
         self.ldap = ldap_conn
         self.output_paths = output_paths
         self.logger = get_logger()
@@ -25,6 +24,7 @@ class AccessChecker:
         self.username = username
         self.password = password
         self.hashes = hashes
+        self.target_files = target_files or TargetFiles(output_paths['data'], TargetScope(), self.logger)
         self.pwn3d_label = self._get_pwn3d_label()
     
     def _get_pwn3d_label(self) -> str:
@@ -65,14 +65,14 @@ class AccessChecker:
     def _get_hosts_file(self, filename: str) -> Optional[Path]:
         """Get the path to a hosts file if it exists."""
         hosts_file = self.output_paths['data'] / filename
-        if hosts_file.exists():
-            # Check if file has content
-            with open(hosts_file, 'r') as f:
-                content = f.read().strip()
-                if content:
-                    return hosts_file
+        if hosts_file.exists() and self.target_files.has_targets(hosts_file):
+            return hosts_file
         return None
     
+    def _read_filtered_hosts(self, hosts_file: Path) -> Tuple[List[str], int]:
+        result = self.target_files.read(hosts_file)
+        return result.targets, result.excluded_count
+
     def _build_netexec_cmd(self, protocol: str, hosts_file: Path) -> List[str]:
         """Build netexec command with authentication."""
         cmd = ['netexec', protocol, str(hosts_file)]
@@ -91,34 +91,37 @@ class AccessChecker:
     
     def _run_netexec(self, protocol: str, hosts_file: Path, timeout: int = 300) -> str:
         """Run netexec and return output."""
-        cmd = self._build_netexec_cmd(protocol, hosts_file)
-        
-        self.logger.debug(f"Running: {' '.join(cmd)}")
-        
-        try:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                encoding='utf-8',
-                errors='replace',
-                timeout=timeout
-            )
-            output = (result.stdout or '') + (result.stderr or '')
+        with self.target_files.approved_file(hosts_file, protocol.upper()) as target_file:
+            if not target_file:
+                return ""
+
+            cmd = self._build_netexec_cmd(protocol, target_file)
+            self.logger.debug(f"Running: {' '.join(cmd)}")
+
+            try:
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    encoding='utf-8',
+                    errors='replace',
+                    timeout=timeout
+                )
+                output = (result.stdout or '') + (result.stderr or '')
             
-            # Strip ANSI color codes
-            output = re.sub(r'\x1b\[[0-9;]*m', '', output)
+                # Strip ANSI color codes
+                output = re.sub(r'\x1b\[[0-9;]*m', '', output)
             
-            return output
-        except subprocess.TimeoutExpired:
-            self.logger.error(f"[-] netexec {protocol} timed out")
-            return ""
-        except FileNotFoundError:
-            self.logger.error("[-] netexec not found on system")
-            return ""
-        except Exception as e:
-            self.logger.error(f"[-] Error running netexec {protocol}: {e}")
-            return ""
+                return output
+            except subprocess.TimeoutExpired:
+                self.logger.error(f"[-] netexec {protocol} timed out")
+                return ""
+            except FileNotFoundError:
+                self.logger.error("[-] netexec not found on system")
+                return ""
+            except Exception as e:
+                self.logger.error(f"[-] Error running netexec {protocol}: {e}")
+                return ""
     
     def _parse_pwn3d_output(self, output: str) -> List[Tuple[str, str]]:
         """Parse netexec output for lines containing pwn3d_label.
@@ -204,8 +207,7 @@ class AccessChecker:
     def _count_hosts_in_file(self, hosts_file: Path) -> int:
         """Count number of non-empty lines in hosts file."""
         try:
-            with open(hosts_file, 'r') as f:
-                return sum(1 for line in f if line.strip())
+            return self.target_files.count(hosts_file)
         except Exception:
             return 0
     

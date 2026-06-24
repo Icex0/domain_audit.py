@@ -6,6 +6,7 @@ from pathlib import Path
 
 from ...utils.logger import get_logger
 from ...utils.ldap import LDAPConnection
+from ...utils.targets import TargetFiles, TargetScope
 from ...utils.output import write_lines
 
 
@@ -13,7 +14,9 @@ class SQLChecker:
     """SQL Server enumeration via netexec."""
     
     def __init__(self, ldap_conn: LDAPConnection, output_paths: Dict[str, Path],
-                 username: str = None, password: str = None, hashes: str = None):
+                 username: str = None, password: str = None, hashes: str = None,
+                 target_scope: TargetScope = None,
+                 target_files: TargetFiles = None):
         self.ldap = ldap_conn
         self.output_paths = output_paths
         self.logger = get_logger()
@@ -21,6 +24,8 @@ class SQLChecker:
         self.username = username
         self.password = password
         self.hashes = hashes
+        self.target_scope = target_scope or TargetScope()
+        self.target_files = target_files or TargetFiles(output_paths['data'], self.target_scope, self.logger)
     
     def check_sql(self):
         """Run all SQL checks."""
@@ -109,15 +114,12 @@ class SQLChecker:
         
         # First, check network scan results for MSSQL hosts (port 1433)
         try:
-            mssql_file = self.output_paths['data'] / 'scandata_hostalive_mssql.txt'
-            if mssql_file.exists():
-                with open(mssql_file, 'r') as f:
-                    for line in f:
-                        ip = line.strip()
-                        if ip and ip not in hosts:
-                            hosts.append(ip)
-                if hosts:
-                    self.logger.info(f"[*] Found {len(hosts)} MSSQL hosts from network scan")
+            filtered_hosts = self.target_files.read('scandata_hostalive_mssql.txt', "MSSQL").targets
+            for ip in filtered_hosts:
+                if ip not in hosts:
+                    hosts.append(ip)
+            if hosts:
+                self.logger.info(f"[*] Found {len(hosts)} MSSQL hosts from network scan")
         except Exception as e:
             self.logger.debug(f"Failed to read network scan MSSQL results: {e}")
         
@@ -130,8 +132,11 @@ class SQLChecker:
                 attributes=['dNSHostName', 'servicePrincipalName']
             )
             
-            for entry in results:
-                hostname = entry.get('dNSHostName', '')
+            hostnames = [entry.get('dNSHostName', '') for entry in results if entry.get('dNSHostName')]
+            filtered_spns = self.target_scope.filter_targets(
+                hostnames, logger=self.logger, label="MSSQL SPN host"
+            ).targets
+            for hostname in filtered_spns:
                 if hostname and hostname not in hosts:
                     hosts.append(hostname)
                     spn_hosts.append(hostname)
