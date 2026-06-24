@@ -55,6 +55,7 @@ class LDAPConfig:
 
 class LDAPConnection:
     """Manages LDAP connections and queries."""
+    PAGE_SIZE = 1000
     
     def __init__(self, config: LDAPConfig):
         self.config = config
@@ -116,6 +117,15 @@ class LDAPConnection:
             self.connect()
             self.connection.search(**search_kwargs)
 
+    def _paged_search_with_retry(self, **search_kwargs):
+        """Run a paged LDAP search, reconnecting once if needed."""
+        try:
+            return self.connection.extend.standard.paged_search(**search_kwargs)
+        except LDAPCommunicationError as e:
+            self.logger.log_verbose(f"LDAP connection lost ({e}); reconnecting and retrying")
+            self.connect()
+            return self.connection.extend.standard.paged_search(**search_kwargs)
+
     def query(self, search_base: str, search_filter: str, attributes: List[str] = None) -> List[Dict]:
         """
         Execute LDAP query.
@@ -134,18 +144,22 @@ class LDAPConnection:
         try:
             attrs = attributes if attributes else ALL_ATTRIBUTES
 
-            self._search_with_retry(
+            response = self._paged_search_with_retry(
                 search_base=search_base,
                 search_filter=search_filter,
                 search_scope=SUBTREE,
-                attributes=attrs
+                attributes=attrs,
+                paged_size=self.PAGE_SIZE,
+                generator=False
             )
             
             results = []
-            for entry in self.connection.entries:
+            for entry in response:
+                if entry.get('type') != 'searchResEntry':
+                    continue
+
                 entry_data = {}
-                for attr in entry.entry_attributes:
-                    value = entry[attr].value
+                for attr, value in entry.get('attributes', {}).items():
                     if isinstance(value, list) and len(value) == 1:
                         value = value[0]
                     entry_data[attr] = value
