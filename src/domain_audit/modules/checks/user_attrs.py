@@ -162,7 +162,7 @@ class UserAttrsChecker:
                     elif isinstance(password_attr, list):
                         password_attr = str(password_attr[0]) if password_attr else ''
                     
-                    self.logger.highlight(f"  User: {username} - userPassword: {password_attr}")
+                    self.logger.finding(f"  User: {username} - userPassword: {password_attr}")
                     results.append(f"{username}:{password_attr}")
                 
                 write_lines(results, filepath)
