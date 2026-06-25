@@ -11,6 +11,7 @@ import ipaddress
 
 from ...utils.logger import get_logger
 from ...utils.ldap import LDAPConnection
+from ...utils.netexec import report_netexec_failure
 from ...utils.targets import TargetFiles, TargetScope
 from ...utils.output import write_lines
 
@@ -486,11 +487,10 @@ class NetworkChecker:
         (same output dir/day) to have populated scandata_hostalive_smb.txt.
         """
         smb_file = self.output_paths['data'] / 'scandata_hostalive_smb.txt'
-        smb_ips = self.target_files.read(smb_file, "SMB").targets
+        smb_ips = self.target_files.read_discovered(smb_file, "SMB").targets
 
         if not smb_ips:
             self.logger.info("---Checking for WebClient service---")
-            self.logger.warning("[!] No SMB host data found - run '--check network' first (same output dir/day) or a full scan to populate hosts")
             return
 
         # Populate self.hosts so _check_webclient can filter on port 445
@@ -554,6 +554,10 @@ class NetworkChecker:
                 # Write all netexec output (raw dump of both modules)
                 write_lines(output.split('\n'),
                           self.output_paths['data'] / 'netexec_smb_modules.txt')
+
+                if report_netexec_failure(self.logger, "netexec webdav/enum_cve modules", result):
+                    self.logger.warning("[!] Skipping WebClient/CVE parsing because the NetExec module command failed")
+                    return
                 
                 # --- WebClient service check ---
                 self.logger.info("---Checking for WebClient service---")

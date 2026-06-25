@@ -23,6 +23,22 @@ class BloodHoundChecker:
         self.username = username
         self.password = password
         self.hashes = hashes
+
+    def _build_netexec_command(self, dc: str, collection_method: str):
+        cmd = [
+            'netexec', 'ldap', dc,
+            '-d', self.domain,
+            '--dns-server', dc,
+            '-u', self.username,
+        ]
+
+        if self.hashes and not self.password:
+            cmd.extend(['-H', self.hashes])
+        else:
+            cmd.extend(['-p', self.password])
+
+        cmd.extend(['--bloodhound', '-c', collection_method])
+        return cmd
     
     def check_bloodhound(self, collection_method: str = "all", zip_output: bool = True):
         """Run BloodHound data collection.
@@ -54,24 +70,7 @@ class BloodHoundChecker:
         self.logger.info(f"[*] Running BloodHound collection: {collection_method}")
         self.logger.info(f"[*] Output directory: {bh_output}")
         
-        # Build netexec command with --bloodhound flag
-        cmd = [
-            'netexec', 'ldap', dc,
-            '-u', self.username,
-            '-p', self.password,
-            '--bloodhound',
-            '-c', collection_method
-        ]
-        
-        # Use hashes if provided instead of password
-        if self.hashes and not self.password:
-            cmd = [
-                'netexec', 'ldap', dc,
-                '-u', self.username,
-                '-H', self.hashes,
-                '--bloodhound',
-                '-c', collection_method
-            ]
+        cmd = self._build_netexec_command(dc, collection_method)
         
         try:
             self.logger.info(f"[*] Starting BloodHound collection (this may take a while)...")

@@ -3,11 +3,11 @@
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional
+from typing import Annotated, List, Optional
 
 import typer
-from typing_extensions import Annotated
 
+from . import __version__
 from .config import DOMAIN_FUNCTIONAL_LEVELS
 from .core.auth import Credentials, ADAuthManager
 from .core.exceptions import DomainAuditError
@@ -16,7 +16,15 @@ from .utils.output import create_output_directory, write_lines
 from .utils.ldap import LDAPConnection, LDAPConfig
 from .utils.ip_exclusions import IPExclusions
 from .utils.targets import TargetScope
-from .utils.dependencies import check_and_set_dns, reset_dns, is_admin, check_netexec_available, check_certipy_available
+from .utils.dependencies import (
+    check_and_set_dns,
+    reset_dns,
+    is_admin,
+    check_netexec_available,
+    check_netexec_bloodhound_ce_available,
+    check_netexec_modules_available,
+    check_certipy_available,
+)
 from .modules.enumeration import ADEnumerator
 from .modules.checks import SecurityChecker
 
@@ -26,6 +34,48 @@ app = typer.Typer(
     add_completion=False,
     context_settings={"help_option_names": ["-h", "--help"]}
 )
+
+
+NETEXEC_MODULE_REQUIREMENTS = {
+    'cve': {'smb': ['webdav', 'enum_cve']},
+    'network': {'smb': ['webdav', 'enum_cve']},
+    'dc-vulns': {'smb': ['nopac', 'zerologon']},
+    'sql': {'mssql': ['enum_links', 'enum_impersonate']},
+}
+
+
+def _version_callback(value: bool):
+    if value:
+        print(f"domain-audit {__version__}")
+        raise typer.Exit(0)
+
+
+def _print_short_usage():
+    print(f"""domain-audit {__version__}
+Active Directory security audit tool
+
+Usage:
+  domain-audit -d <domain> -dc <dc-ip> -u <user> -p <password>
+
+Quick commands:
+  domain-audit -L                 List available checks
+  domain-audit --check adcs ...   Run a single check
+  domain-audit --version          Show version
+
+Run 'domain-audit --help' for all options.""")
+
+
+def _check_netexec_module_requirements(check_names: List[str], required: bool = False) -> bool:
+    requirements = {}
+    for check_name in check_names:
+        for protocol, modules in NETEXEC_MODULE_REQUIREMENTS.get(check_name, {}).items():
+            requirements.setdefault(protocol, set()).update(modules)
+
+    ok = True
+    for protocol, modules in requirements.items():
+        if not check_netexec_modules_available(protocol, sorted(modules), required=required):
+            ok = False
+    return ok
 
 
 @app.callback(invoke_without_command=True)
@@ -43,6 +93,7 @@ def main(
     exclude_ip: Annotated[Optional[List[str]], typer.Option("--exclude-ip", help="Exclude IP/CIDR from non-DC host scanning. Can be repeated or comma-separated.")] = None,
     check: Annotated[Optional[str], typer.Option("--check", "-c", help="Run a specific check instead of full audit")] = None,
     list_checks: Annotated[bool, typer.Option("--list", "-L", help="List available checks")] = False,
+    version: Annotated[Optional[bool], typer.Option("--version", callback=_version_callback, is_eager=True, help="Show version and exit")] = None,
 ):
     """
     Active Directory Domain Audit Tool.
@@ -68,8 +119,7 @@ def main(
     
     # No options provided - show help
     if not domain and not server and not username and not check:
-        print("Usage: domain-audit [OPTIONS]")
-        print("\nRun 'domain-audit --help' for more information.")
+        _print_short_usage()
         raise typer.Exit(0)
     
     # Run specific check or full audit
@@ -121,6 +171,15 @@ def _run_check(
     if check_name not in available:
         logger.error(f"[-] Unknown check: {check_name}")
         logger.info("Use -L to list available checks")
+        raise typer.Exit(1)
+
+    if check_name == 'bloodhound':
+        if not check_netexec_available():
+            raise typer.Exit(1)
+        if not check_netexec_bloodhound_ce_available(required=True):
+            raise typer.Exit(1)
+
+    if not _check_netexec_module_requirements([check_name], required=True):
         raise typer.Exit(1)
     
     # Check and set DNS
@@ -209,6 +268,12 @@ def _run_audit(
     # Check if netexec is available
     if not check_netexec_available():
         raise typer.Exit(1)
+
+    _check_netexec_module_requirements(list(NETEXEC_MODULE_REQUIREMENTS))
+
+    if not skip_bloodhound and not check_netexec_bloodhound_ce_available():
+        logger.warning("[!] Skipping BloodHound collection; continuing with other checks")
+        skip_bloodhound = True
     
     # Check if certipy is available
     if not check_certipy_available():

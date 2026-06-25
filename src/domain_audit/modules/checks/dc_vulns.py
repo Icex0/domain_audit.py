@@ -3,11 +3,13 @@
 import subprocess
 import tempfile
 import re
+import os
 from typing import Dict, List
 from pathlib import Path
 
 from ...utils.logger import get_logger
 from ...utils.ldap import LDAPConnection
+from ...utils.netexec import report_netexec_failure
 from ...utils.output import write_lines
 
 
@@ -86,6 +88,7 @@ class DCVulnsChecker:
     
     def _run_vulnerability_check(self, dc_ips: List[str]):
         """Run netexec with zerologon and nopac modules."""
+        hosts_file = None
         try:
             # Create temp file with DC IPs
             with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
@@ -125,13 +128,13 @@ class DCVulnsChecker:
             # Save raw output
             write_lines(output.split('\n'),
                        self.output_paths['data'] / 'netexec_dc_vulns.txt')
+
+            if report_netexec_failure(self.logger, "netexec zerologon/nopac modules", result):
+                self.logger.warning("[!] Skipping DC vulnerability parsing because the NetExec module command failed")
+                return
             
             # Parse results
             self._parse_vulnerability_output(output)
-            
-            # Clean up temp file
-            import os
-            os.unlink(hosts_file)
             
         except subprocess.TimeoutExpired:
             self.logger.error("[-] DC vulnerability check timed out after 10 minutes")
@@ -139,6 +142,9 @@ class DCVulnsChecker:
             self.logger.error("[-] netexec not found")
         except Exception as e:
             self.logger.error(f"[-] Error running DC vulnerability check: {e}")
+        finally:
+            if hosts_file and os.path.exists(hosts_file):
+                os.unlink(hosts_file)
     
     def _parse_vulnerability_output(self, output: str):
         """Parse netexec output for vulnerabilities and errors."""

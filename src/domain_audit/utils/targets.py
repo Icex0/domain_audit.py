@@ -150,6 +150,26 @@ class TargetFiles:
         result = self.filter_ips(hosts, label, log)
         return result
 
+    def read_discovered(self, filename: Union[str, Path], label: str = "target") -> FilteredTargets:
+        """Read hosts discovered by the network scan and explain an empty result."""
+        result = self.read(filename, label)
+        if result.targets:
+            return result
+
+        if self.logger:
+            hosts_file = self._path(filename)
+            if hosts_file.exists() and result.excluded_count:
+                self.logger.info(f"[*] No {label} hosts remain after applying --exclude-ip")
+            elif (self.data_path / 'scandata_hostalive.txt').exists():
+                self.logger.success(f"[+] No {label} hosts discovered by the network scan")
+            else:
+                self.logger.warning(
+                    f"[!] No {label} host data found - run '--check network' first "
+                    "(same output dir/day) or a full scan to populate hosts"
+                )
+
+        return result
+
     def has_targets(self, filename: Union[str, Path]) -> bool:
         return bool(self.read(filename, log=False).targets)
 

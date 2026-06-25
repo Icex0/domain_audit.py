@@ -62,10 +62,10 @@ class AccessChecker:
         self._check_rdp_access()
         self._check_mssql_access()
     
-    def _get_hosts_file(self, filename: str) -> Optional[Path]:
+    def _get_hosts_file(self, filename: str, label: str) -> Optional[Path]:
         """Get the path to a hosts file if it exists."""
         hosts_file = self.output_paths['data'] / filename
-        if hosts_file.exists() and self.target_files.has_targets(hosts_file):
+        if self.target_files.read_discovered(hosts_file, label).targets:
             return hosts_file
         return None
     
@@ -215,9 +215,8 @@ class AccessChecker:
         """Check for local admin access over SMB."""
         self.logger.info("---Checking for local admin access over SMB---")
         
-        hosts_file = self._get_hosts_file('scandata_hostalive_smb.txt')
+        hosts_file = self._get_hosts_file('scandata_hostalive_smb.txt', 'SMB')
         if not hosts_file:
-            self.logger.warning("[!] No SMB host data found - run '--check network' first (same output dir/day) or a full scan to populate hosts")
             return
         
         # Count hosts
@@ -244,9 +243,8 @@ class AccessChecker:
         """Check for access over WINRM."""
         self.logger.info("---Checking for access over WINRM---")
         
-        hosts_file = self._get_hosts_file('scandata_hostalive_winrm.txt')
+        hosts_file = self._get_hosts_file('scandata_hostalive_winrm.txt', 'WinRM')
         if not hosts_file:
-            self.logger.warning("[!] No WinRM host data found - run '--check network' first (same output dir/day) or a full scan to populate hosts")
             return
         
         # Count hosts
@@ -273,9 +271,8 @@ class AccessChecker:
         """Check for local admin access over RDP."""
         self.logger.info("---Checking for local admin access over RDP---")
         
-        hosts_file = self._get_hosts_file('scandata_hostalive_rdp.txt')
+        hosts_file = self._get_hosts_file('scandata_hostalive_rdp.txt', 'RDP')
         if not hosts_file:
-            self.logger.warning("[!] No RDP host data found - run '--check network' first (same output dir/day) or a full scan to populate hosts")
             return
         
         # Count hosts
@@ -346,9 +343,8 @@ class AccessChecker:
         """Check for access over MSSQL and sysadmin privileges."""
         self.logger.info("---Checking for access over MSSQL---")
         
-        hosts_file = self._get_hosts_file('scandata_hostalive_mssql.txt')
+        hosts_file = self._get_hosts_file('scandata_hostalive_mssql.txt', 'MSSQL')
         if not hosts_file:
-            self.logger.warning("[!] No MSSQL host data found - run '--check network' first (same output dir/day) or a full scan to populate hosts")
             return
         
         # Count hosts

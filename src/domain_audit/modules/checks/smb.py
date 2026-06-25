@@ -43,7 +43,6 @@ class SMBChecker:
             smb_hosts = self._filter_hosts(smb_hosts)
         
         if not smb_hosts:
-            self.logger.warning("[!] No SMB host data found - run '--check network' first (same output dir/day) or a full scan to populate SMB hosts")
             return
         
         self._check_null_session(smb_hosts)
@@ -51,7 +50,7 @@ class SMBChecker:
     
     def _load_smb_hosts(self) -> List[str]:
         """Load SMB hosts from scan data file."""
-        return self.target_files.read('scandata_hostalive_smb.txt', "SMB").targets
+        return self.target_files.read_discovered('scandata_hostalive_smb.txt', "SMB").targets
 
     def _filter_hosts(self, hosts: List[str]) -> List[str]:
         return self.target_files.filter_ips(hosts, "SMB").targets
@@ -237,7 +236,6 @@ class SMBChecker:
             smb_hosts = self._filter_hosts(smb_hosts)
         
         if not smb_hosts:
-            self.logger.warning("[!] No SMB host data found - run '--check network' first (same output dir/day) or a full scan to populate SMB hosts")
             return
         
         # Load domain admins

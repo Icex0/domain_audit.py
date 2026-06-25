@@ -6,6 +6,7 @@ from pathlib import Path
 
 from ...utils.logger import get_logger
 from ...utils.ldap import LDAPConnection
+from ...utils.netexec import report_netexec_failure
 from ...utils.targets import TargetFiles, TargetScope
 from ...utils.output import write_lines
 
@@ -176,9 +177,17 @@ class SQLChecker:
                 errors='replace',
                 timeout=30
             )
-            return (result.stdout or '') + (result.stderr or '')
+            output = (result.stdout or '') + (result.stderr or '')
+            report_netexec_failure(self.logger, f"netexec MSSQL {module} module for {host}", result)
+            return output
+        except subprocess.TimeoutExpired:
+            self.logger.error(f"[-] netexec MSSQL {module} module timed out for {host}")
+            return ""
+        except FileNotFoundError:
+            self.logger.error("[-] netexec not found on system")
+            return ""
         except Exception as e:
-            self.logger.debug(f"netexec module {module} failed for {host}: {e}")
+            self.logger.error(f"[-] Error running netexec MSSQL {module} module for {host}: {e}")
             return ""
     
     def _parse_links_output(self, output: str) -> List[str]:
