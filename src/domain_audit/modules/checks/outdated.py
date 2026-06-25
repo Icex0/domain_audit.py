@@ -1,12 +1,20 @@
 """Phase 6 security checks - Outdated computers, inactive objects, privileged objects, domain join, Pre-Windows 2000."""
 
+import re
 from typing import Dict, List
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 from ...utils.logger import get_logger
 from ...utils.ldap import LDAPConnection
-from ...config import EOL_OS_PATTERNS, WIN10_EOS_VERSIONS, WIN10_VERSION_NAMES, WIN11_EOS_VERSIONS, WIN11_VERSION_NAMES
+from ...config import (
+    EOL_OS_PATTERNS,
+    WIN10_EOS_VERSIONS,
+    WIN10_LONG_TERM_SUPPORT,
+    WIN10_VERSION_NAMES,
+    WIN11_EOS_VERSIONS,
+    WIN11_VERSION_NAMES,
+)
 from ...utils.output import write_csv, write_lines
 
 
@@ -46,6 +54,34 @@ class OutdatedChecker:
         self._check_anonymous_logon_groups()
         self._check_domain_join()
 
+    @staticmethod
+    def _extract_os_build(version: str) -> str:
+        """Extract Windows build from AD formats like '10.0 (19045)' or '10.0.19045'."""
+        if not version:
+            return ''
+
+        parenthesized = re.search(r'\((\d{5})\)', version)
+        if parenthesized:
+            return parenthesized.group(1)
+
+        parts = version.split('.')
+        if len(parts) > 2 and parts[2].isdigit():
+            return parts[2]
+
+        standalone = re.search(r'\b(\d{5})\b', version)
+        return standalone.group(1) if standalone else ''
+
+    @staticmethod
+    def _has_supported_win10_long_term_lifecycle(os: str, build: str) -> bool:
+        os_lower = os.lower()
+        for release in WIN10_LONG_TERM_SUPPORT:
+            if release['build'] != build:
+                continue
+            if not any(marker.lower() in os_lower for marker in release['markers']):
+                continue
+            return date.today() <= date.fromisoformat(release['end_date'])
+        return False
+
     def _check_outdated_computers(self):
         """Check for EOL operating systems in AD."""
         self.logger.info("---Checking for EOL operating systems---")
@@ -80,9 +116,8 @@ class OutdatedChecker:
                 os = comp.get('operatingSystem') or ''
                 version = comp.get('operatingSystemVersion') or ''
                 if 'Windows 10' in os:
-                    parts = version.split('.') if version else []
-                    build = parts[2] if len(parts) > 2 else ''
-                    if build in WIN10_EOS_VERSIONS:
+                    build = self._extract_os_build(version)
+                    if build in WIN10_EOS_VERSIONS and not self._has_supported_win10_long_term_lifecycle(os, build):
                         readable = WIN10_VERSION_NAMES.get(build, build)
                         comp['operatingSystemVersion'] = version.replace(build, readable)
                         win10_eos.append(comp)
@@ -99,8 +134,7 @@ class OutdatedChecker:
                 os = comp.get('operatingSystem') or ''
                 version = comp.get('operatingSystemVersion') or ''
                 if 'Windows 11' in os:
-                    parts = version.split('.') if version else []
-                    build = parts[2] if len(parts) > 2 else ''
+                    build = self._extract_os_build(version)
                     if build in WIN11_EOS_VERSIONS:
                         readable = WIN11_VERSION_NAMES.get(build, build)
                         comp['operatingSystemVersion'] = version.replace(build, readable)
