@@ -90,6 +90,7 @@ def main(
     bloodhound_options: Annotated[str, typer.Option("--bloodhound-options", help="BloodHound collection method: all, default, sessions, acl, computer")] = "all",
     skip_roasting: Annotated[bool, typer.Option("--skip-roasting", help="Skip Kerberoast/AS-REP roast")] = False,
     use_ldaps: Annotated[bool, typer.Option("--ldaps", help="Use LDAPS instead of LDAP")] = False,
+    include_ip: Annotated[Optional[List[str]], typer.Option("--include-ip", help="Only include IP/CIDR in non-DC host scanning. Can be repeated or comma-separated.")] = None,
     exclude_ip: Annotated[Optional[List[str]], typer.Option("--exclude-ip", help="Exclude IP/CIDR from non-DC host scanning. Can be repeated or comma-separated.")] = None,
     check: Annotated[Optional[str], typer.Option("--check", "-c", help="Run a specific check instead of full audit")] = None,
     list_checks: Annotated[bool, typer.Option("--list", "-L", help="List available checks")] = False,
@@ -128,7 +129,7 @@ def main(
             check_name=check, domain=domain, server=server, username=username,
             password=password, output=output, verbose=verbose,
             use_ldaps=use_ldaps, bloodhound_options=bloodhound_options,
-            exclude_ip=exclude_ip
+            include_ip=include_ip, exclude_ip=exclude_ip
         )
     else:
         _run_audit(
@@ -136,7 +137,7 @@ def main(
             password=password, output=output, verbose=verbose,
             skip_bloodhound=skip_bloodhound, bloodhound_options=bloodhound_options,
             skip_roasting=skip_roasting, use_ldaps=use_ldaps,
-            exclude_ip=exclude_ip
+            include_ip=include_ip, exclude_ip=exclude_ip
         )
 
 
@@ -145,6 +146,7 @@ def _run_check(
     password: Optional[str] = None,
     output: Optional[Path] = None, verbose: bool = False,
     use_ldaps: bool = False, bloodhound_options: str = "all",
+    include_ip: Optional[List[str]] = None,
     exclude_ip: Optional[List[str]] = None
 ):
     """Internal function to run a specific check."""
@@ -164,6 +166,7 @@ def _run_check(
         logger.error("[-] Missing required option: --password / -p")
         raise typer.Exit(1)
 
+    ip_inclusions = _parse_ip_inclusions(include_ip, logger)
     ip_exclusions = _parse_ip_exclusions(exclude_ip, logger)
     
     # Validate check name
@@ -202,7 +205,8 @@ def _run_check(
     try:
         with LDAPConnection(ldap_config) as ldap_conn:
             target_scope = TargetScope.from_ldap(
-                ldap_conn, ip_exclusions, logger, extra_targets=[server]
+                ldap_conn, ip_exclusions, logger, extra_targets=[server],
+                inclusions=ip_inclusions
             )
             checker = SecurityChecker(
                 ldap_conn, paths,
@@ -234,6 +238,7 @@ def _run_audit(
     output: Optional[Path] = None, verbose: bool = False,
     skip_bloodhound: bool = False, bloodhound_options: str = "all",
     skip_roasting: bool = False, use_ldaps: bool = False,
+    include_ip: Optional[List[str]] = None,
     exclude_ip: Optional[List[str]] = None
 ):
     """Internal function to run the audit."""
@@ -254,6 +259,7 @@ def _run_audit(
         logger.error("[-] Missing required option: --password / -p")
         raise typer.Exit(1)
 
+    ip_inclusions = _parse_ip_inclusions(include_ip, logger)
     ip_exclusions = _parse_ip_exclusions(exclude_ip, logger)
     
     # Record and display start time
@@ -319,7 +325,8 @@ def _run_audit(
             domain_data = enumerator.enumerate_all()
             target_scope = TargetScope.from_ldap(
                 ldap_conn, ip_exclusions, logger, domain_data.domain_controllers,
-                extra_targets=[server]
+                extra_targets=[server],
+                inclusions=ip_inclusions
             )
             
             # Print domain summary
@@ -369,6 +376,20 @@ def _parse_ip_exclusions(exclude_ip, logger) -> IPExclusions:
 
     logger.info(f"[*] Excluding non-DC IP targets: {ip_exclusions.summary()}")
     return ip_exclusions
+
+
+def _parse_ip_inclusions(include_ip, logger) -> IPExclusions:
+    try:
+        ip_inclusions = IPExclusions.from_values(include_ip, option_name="--include-ip")
+    except ValueError as e:
+        logger.error(f"[-] {e}")
+        raise typer.Exit(1)
+
+    if not ip_inclusions:
+        return ip_inclusions
+
+    logger.info(f"[*] Limiting non-DC IP targets to: {ip_inclusions.summary()}")
+    return ip_inclusions
 
 
 def print_explanation(output_dir: Path):

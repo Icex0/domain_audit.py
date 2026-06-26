@@ -267,9 +267,9 @@ class SecurityChecker:
         return {name: info[0] for name, info in AVAILABLE_CHECKS.items()}
 
     def _warn_if_bloodhound_cannot_enforce_exclusions(self):
-        if self.target_scope.has_non_dc_exclusions():
+        if self.target_scope.has_non_dc_target_limits():
             self.logger.warning(
-                "[!] --exclude-ip is not enforced for BloodHound because netexec "
+                "[!] --include-ip/--exclude-ip is not enforced for BloodHound because netexec "
                 "does not expose a BloodHound target exclusion flag"
             )
 

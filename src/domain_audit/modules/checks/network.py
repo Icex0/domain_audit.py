@@ -89,9 +89,12 @@ class NetworkChecker:
                 
                 ip = self._dns_resolve(hostname)
                 if ip:
-                    if self.target_scope.excludes_ip(ip):
+                    filter_reason = self.target_scope.filter_reason(ip)
+                    if filter_reason:
                         excluded_count += 1
-                        self.logger.log_verbose(f"[*] Excluding {hostname} ({ip}) from network scan")
+                        self.logger.log_verbose(
+                            f"[*] Excluding {hostname} ({ip}) from network scan by {filter_reason}"
+                        )
                         continue
                     host_ip_map.append(f"{hostname}: {ip}")
                     ips.append(ip)
@@ -114,7 +117,9 @@ class NetworkChecker:
             
             self.logger.info(f"[*] Resolved IPs for {len(ips)} hosts")
             if excluded_count:
-                self.logger.info(f"[*] Excluded {excluded_count} host(s) by --exclude-ip")
+                self.logger.info(
+                    f"[*] Excluded {excluded_count} host(s) by {self.target_scope.filter_label()}"
+                )
             
         except Exception as e:
             self.logger.error(f"[-] Error resolving host IPs: {e}")

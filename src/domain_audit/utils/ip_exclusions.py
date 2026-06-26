@@ -11,7 +11,11 @@ class IPExclusions:
     networks: Tuple[Union[ipaddress.IPv4Network, ipaddress.IPv6Network], ...]
 
     @classmethod
-    def from_values(cls, values: Optional[Iterable[str]] = None) -> "IPExclusions":
+    def from_values(
+        cls,
+        values: Optional[Iterable[str]] = None,
+        option_name: str = "--exclude-ip",
+    ) -> "IPExclusions":
         networks = []
         for value in values or []:
             for part in value.split(','):
@@ -21,7 +25,7 @@ class IPExclusions:
                 try:
                     networks.append(ipaddress.ip_network(item, strict=False))
                 except ValueError as e:
-                    raise ValueError(f"Invalid --exclude-ip value '{item}': {e}") from e
+                    raise ValueError(f"Invalid {option_name} value '{item}': {e}") from e
         return cls(tuple(networks))
 
     def __bool__(self) -> bool:

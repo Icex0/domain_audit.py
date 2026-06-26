@@ -22,18 +22,20 @@ class FilteredTargets:
 
 
 class TargetScope:
-    """Audit target policy: exclude configured IP ranges except domain controllers."""
+    """Audit target policy for include/exclude IP ranges except domain controllers."""
 
     def __init__(
         self,
         exclusions: Optional[IPExclusions] = None,
         allowed_ips: Optional[Iterable[IPAddress]] = None,
+        inclusions: Optional[IPExclusions] = None,
     ):
         self.exclusions = exclusions or IPExclusions.from_values()
+        self.inclusions = inclusions or IPExclusions.from_values()
         self.allowed_ips = frozenset(allowed_ips or [])
 
     def __bool__(self) -> bool:
-        return bool(self.exclusions)
+        return bool(self.exclusions) or bool(self.inclusions)
 
     @classmethod
     def from_ldap(
@@ -43,8 +45,9 @@ class TargetScope:
         logger=None,
         domain_controllers=None,
         extra_targets: Optional[Iterable[str]] = None,
+        inclusions: Optional[IPExclusions] = None,
     ) -> "TargetScope":
-        scope = cls(exclusions)
+        scope = cls(exclusions, inclusions=inclusions)
         if not scope:
             return scope
 
@@ -70,10 +73,11 @@ class TargetScope:
         updated = scope.with_allowed_targets(targets)
         newly_allowed = sorted(
             str(ip) for ip in updated.allowed_ips - scope.allowed_ips
-            if scope.exclusions.contains_ip(str(ip))
+            if scope.filter_reason(str(ip))
         )
         if newly_allowed and logger:
-            logger.info("[*] Keeping Domain Controller IP(s) in scope despite --exclude-ip: "
+            logger.info("[*] Keeping Domain Controller IP(s) in scope despite "
+                        f"{scope.filter_label()}: "
                         + ', '.join(newly_allowed))
         return updated
 
@@ -83,7 +87,7 @@ class TargetScope:
             ip = self.resolve_target(target)
             if ip:
                 allowed_ips.add(ip)
-        return TargetScope(self.exclusions, allowed_ips)
+        return TargetScope(self.exclusions, allowed_ips, self.inclusions)
 
     def resolve_target(self, target: str) -> Optional[IPAddress]:
         if not target:
@@ -97,12 +101,21 @@ class TargetScope:
         except Exception:
             return None
 
-    def excludes_ip(self, ip: str) -> bool:
+    def filter_reason(self, ip: str) -> Optional[str]:
         try:
             addr = ipaddress.ip_address(ip)
         except ValueError:
-            return False
-        return addr not in self.allowed_ips and self.exclusions.contains_ip(ip)
+            return "--include-ip" if self.inclusions else None
+        if addr in self.allowed_ips:
+            return None
+        if self.inclusions and not self.inclusions.contains_ip(ip):
+            return "--include-ip"
+        if self.exclusions.contains_ip(ip):
+            return "--exclude-ip"
+        return None
+
+    def excludes_ip(self, ip: str) -> bool:
+        return self.filter_reason(ip) is not None
 
     def filter_ips(self, ips: Iterable[str]) -> FilteredTargets:
         targets = list(ips)
@@ -114,15 +127,25 @@ class TargetScope:
         excluded_count = 0
         for target in targets:
             resolved = self.resolve_target(target)
-            if resolved and self.excludes_ip(str(resolved)):
+            if not resolved and self.inclusions:
                 excluded_count += 1
                 if logger:
-                    logger.log_verbose(f"[*] Excluding {label} {target} ({resolved}) by --exclude-ip")
+                    logger.log_verbose(
+                        f"[*] Excluding {label} {target} because it cannot be matched by --include-ip"
+                    )
+                continue
+            reason = self.filter_reason(str(resolved)) if resolved else None
+            if reason:
+                excluded_count += 1
+                if logger:
+                    logger.log_verbose(f"[*] Excluding {label} {target} ({resolved}) by {reason}")
                 continue
             kept.append(target)
         return FilteredTargets(kept, excluded_count)
 
-    def has_non_dc_exclusions(self) -> bool:
+    def has_non_dc_target_limits(self) -> bool:
+        if self.inclusions:
+            return True
         for network in self.exclusions.networks:
             if network.num_addresses == 1 and network.network_address in self.allowed_ips:
                 continue
@@ -131,6 +154,13 @@ class TargetScope:
 
     def summary(self) -> str:
         return self.exclusions.summary()
+
+    def filter_label(self) -> str:
+        if self.inclusions and self.exclusions:
+            return "--include-ip/--exclude-ip"
+        if self.inclusions:
+            return "--include-ip"
+        return "--exclude-ip"
 
 
 class TargetFiles:
@@ -159,7 +189,9 @@ class TargetFiles:
         if self.logger:
             hosts_file = self._path(filename)
             if hosts_file.exists() and result.excluded_count:
-                self.logger.info(f"[*] No {label} hosts remain after applying --exclude-ip")
+                self.logger.info(
+                    f"[*] No {label} hosts remain after applying {self.target_scope.filter_label()}"
+                )
             elif (self.data_path / 'scandata_hostalive.txt').exists():
                 self.logger.success(f"[+] No {label} hosts discovered by the network scan")
             else:
@@ -219,4 +251,7 @@ class TargetFiles:
 
     def _log_excluded(self, excluded_count: int, label: str):
         if excluded_count and self.logger:
-            self.logger.info(f"[*] Excluded {excluded_count} {label} host(s) by --exclude-ip")
+            self.logger.info(
+                f"[*] Excluded {excluded_count} {label} host(s) by "
+                f"{self.target_scope.filter_label()}"
+            )
