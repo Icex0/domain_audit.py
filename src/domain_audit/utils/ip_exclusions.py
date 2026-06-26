@@ -2,6 +2,7 @@
 
 import ipaddress
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Iterable, Optional, Tuple, Union
 
 
@@ -17,16 +18,42 @@ class IPExclusions:
         option_name: str = "--exclude-ip",
     ) -> "IPExclusions":
         networks = []
-        for value in values or []:
-            for part in value.split(','):
-                item = part.strip()
-                if not item:
-                    continue
-                try:
-                    networks.append(ipaddress.ip_network(item, strict=False))
-                except ValueError as e:
-                    raise ValueError(f"Invalid {option_name} value '{item}': {e}") from e
+        for item, source in cls._expand_values(values):
+            try:
+                networks.append(ipaddress.ip_network(item, strict=False))
+            except ValueError as e:
+                location = f" in {source}" if source else ""
+                raise ValueError(f"Invalid {option_name} value '{item}'{location}: {e}") from e
         return cls(tuple(networks))
+
+    @classmethod
+    def _expand_values(cls, values: Optional[Iterable[str]]) -> Iterable[Tuple[str, Optional[str]]]:
+        for value in values or []:
+            for item in cls._split_items(value):
+                path = Path(item).expanduser()
+                if path.is_file():
+                    yield from cls._read_items_from_file(path)
+                else:
+                    yield item, None
+
+    @staticmethod
+    def _split_items(value: str) -> Iterable[str]:
+        for part in value.split(','):
+            item = part.strip()
+            if item:
+                yield item
+
+    @classmethod
+    def _read_items_from_file(cls, path: Path) -> Iterable[Tuple[str, Optional[str]]]:
+        try:
+            lines = path.read_text(encoding='utf-8').splitlines()
+        except OSError as e:
+            raise ValueError(f"Could not read IP list file '{path}': {e}") from e
+
+        for line_number, line in enumerate(lines, 1):
+            line = line.split('#', 1)[0]
+            for item in cls._split_items(line):
+                yield item, f"{path}:{line_number}"
 
     def __bool__(self) -> bool:
         return bool(self.networks)
