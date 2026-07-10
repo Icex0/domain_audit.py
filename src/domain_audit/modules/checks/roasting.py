@@ -66,7 +66,7 @@ class RoastingChecker:
             if users:
                 count = len(users)
                 self.logger.finding(f"There are {count} kerberoastable privileged users")
-                write_csv(users, filepath)
+                write_csv(users, filepath, headers=['sAMAccountName', 'servicePrincipalName', 'memberOf'])
             else:
                 self.logger.success("[+] No kerberoastable privileged users found")
                 
@@ -93,7 +93,7 @@ class RoastingChecker:
             if users:
                 count = len(users)
                 self.logger.finding(f"There are {count} kerberoastable users")
-                write_csv(users, spn_file)
+                write_csv(users, spn_file, headers=['sAMAccountName', 'servicePrincipalName'])
                 
                 # Request TGS tickets if credentials available
                 if self.domain and self.username and (self.password or self.hashes) and self.dc_ip:

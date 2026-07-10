@@ -136,7 +136,7 @@ class DelegationChecker:
             
             if computers:
                 count = len(computers)
-                self.logger.finding(f"{count} computers have RBCD enabled - possible compromise indicator!")
+                self.logger.finding(f"{count} computers have RBCD configured - review for legitimacy and abuse paths")
                 names = [c.get('sAMAccountName', '') for c in computers if c.get('sAMAccountName')]
                 write_lines(names, filepath)
             else:
