@@ -7,6 +7,9 @@ from typing import Dict, Optional
 
 from .logger import get_logger
 
+_LAST_LOGON_FIELDS = {'lastLogon', 'lastLogonTimestamp'}
+_NO_LOGON_RECORDED = 'No last logon'
+
 
 def create_output_directory(
     domain: str,
@@ -80,6 +83,12 @@ def write_file(content: str, filepath: Path, logger=None) -> bool:
         return False
 
 
+def _format_csv_value(header: str, value):
+    if header in _LAST_LOGON_FIELDS and value == []:
+        return _NO_LOGON_RECORDED
+    return value
+
+
 def write_csv(data: list, filepath: Path, headers: Optional[list] = None) -> bool:
     """
     Write data to CSV file.
@@ -109,9 +118,13 @@ def write_csv(data: list, filepath: Path, headers: Optional[list] = None) -> boo
                         for key in row.keys():
                             if key not in headers:
                                 headers.append(key)
+                rows = [
+                    {header: _format_csv_value(header, row.get(header)) for header in headers}
+                    for row in data
+                ]
                 writer = csv.DictWriter(f, fieldnames=headers)
                 writer.writeheader()
-                writer.writerows(data)
+                writer.writerows(rows)
             else:
                 writer = csv.writer(f)
                 if headers:
