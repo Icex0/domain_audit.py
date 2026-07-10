@@ -677,6 +677,13 @@ def _reset_dns_linux() -> Tuple[bool, str]:
     return False, "Could not reset DNS automatically"
 
 
+def _sudo_command_hint(domain: str, dc_ip: str, cmd_args: Optional[List[str]] = None) -> str:
+    args = list(cmd_args[1:]) if cmd_args and len(cmd_args) > 1 else [
+        "-d", domain, "-dc", dc_ip, "..."
+    ]
+    return shlex.join(["sudo", "domain-audit", *args])
+
+
 def check_and_set_dns(dc_ip: str, domain: str, cmd_args: list = None) -> bool:
     """
     Check if DNS is set to DC IP, if not attempt to set it.
@@ -714,13 +721,7 @@ def check_and_set_dns(dc_ip: str, domain: str, cmd_args: list = None) -> bool:
             logger.info(f"[*] Or manually run: sudo networksetup -setdnsservers Wi-Fi {dc_ip}")
         else:
             logger.error("[-] Not running as root. Please run with sudo to auto-configure DNS")
-            # Reconstruct the full command if args available
-            if cmd_args and len(cmd_args) > 1:
-                # Remove script path (first arg) and build full command
-                full_args = ' '.join(cmd_args[1:])
-                logger.info(f"[*] Use: sudo $(which uv) run {full_args}")
-            else:
-                logger.info(f"[*] Use: sudo $(which uv) run domain-audit run -d {domain} -dc {dc_ip} ...")
+            logger.info(f"[*] Use: {_sudo_command_hint(domain, dc_ip, cmd_args)}")
             logger.info(f"[*] Or manually: echo 'nameserver {dc_ip}' | sudo tee /etc/resolv.conf > /dev/null")
         
         # Ask user if they want to continue anyway
