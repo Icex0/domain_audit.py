@@ -1,9 +1,11 @@
 """Azure AD Connect checks."""
 
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timezone
 from typing import Dict, List, Optional
 from pathlib import Path
+
+from ldap3.utils.conv import escape_filter_chars
 
 from ...utils.logger import get_logger
 from ...utils.ldap import LDAPConnection
@@ -15,6 +17,12 @@ _CONNECT_SERVER_PATTERNS = [
     r"\bserver\s*:\s*([A-Za-z0-9][A-Za-z0-9._-]*)",
 ]
 _CONNECT_SERVER_TRAILING_PUNCTUATION = ".,;:)]}"
+TRUSTED_FOR_DELEGATION = 0x80000
+TRUSTED_TO_AUTH_FOR_DELEGATION = 0x1000000
+KERBEROS_ENCTYPE_RC4 = 0x4
+KERBEROS_ENCTYPE_AES128 = 0x8
+KERBEROS_ENCTYPE_AES256 = 0x10
+KERBEROS_ENCTYPE_AES = KERBEROS_ENCTYPE_AES128 | KERBEROS_ENCTYPE_AES256
 
 
 def _extract_connect_server_reference(description: str) -> Optional[str]:
@@ -51,6 +59,47 @@ def _format_connect_server_references(references: List[Dict[str, str]]) -> str:
     return "\n\n".join(sections) + "\n"
 
 
+def _coerce_int(value) -> Optional[int]:
+    if isinstance(value, int):
+        return value
+
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return None
+
+    return None
+
+
+def _as_list(value) -> List:
+    if value in (None, '', []):
+        return []
+    if isinstance(value, list):
+        return value
+    return [value]
+
+
+def _ldap_or_filter(attribute: str, values: List) -> str:
+    terms = [f"({attribute}={escape_filter_chars(str(value))})" for value in values]
+    if len(terms) == 1:
+        return terms[0]
+    return f"(|{''.join(terms)})"
+
+
+def _coerce_ad_datetime(value) -> Optional[datetime]:
+    if isinstance(value, datetime):
+        return value
+
+    value = _coerce_int(value)
+    if value and value > 0:
+        windows_epoch_diff = 116444736000000000
+        unix_timestamp = (value - windows_epoch_diff) / 10000000
+        return datetime.fromtimestamp(unix_timestamp, timezone.utc)
+
+    return None
+
+
 class AzureChecker:
     """Checks for Azure AD Connect configuration."""
     
@@ -68,7 +117,7 @@ class AzureChecker:
     
     def check_azure_ad_connect(self):
         """Check for Azure AD Connect installation and configuration."""
-        self.logger.info("---Checking for Azure AD Connect---")
+        self.logger.info("---Checking for Microsoft Entra Connect (Azure AD Connect)---")
         
         findings = []
         
@@ -88,14 +137,15 @@ class AzureChecker:
             findings.extend(sync_groups)
         
         if findings:
-            self.logger.finding("Azure AD Connect may be installed - check for vulnerabilities")
+            self.logger.warning("[!] Microsoft Entra Connect indicators found - review configuration, patch level, and connector-account privileges")
             write_csv(findings, self.output_paths['findings'] / 'azure_ad_connect.txt')
         else:
-            self.logger.success("[+] Azure AD Connect not detected")
+            self.logger.success("[+] No Microsoft Entra Connect indicators detected by these LDAP checks")
     
     def _check_azure_accounts(self) -> List[Dict]:
         """Check for Azure AD Connect related service accounts."""
         accounts = []
+        seen_accounts = set()
         
         try:
             # Search for accounts with Azure-related SPNs or names
@@ -117,13 +167,19 @@ class AzureChecker:
                     )
                     
                     for result in results:
+                        username = result.get('sAMAccountName', '')
+                        account_key = username.lower()
+                        if account_key in seen_accounts:
+                            continue
+
+                        seen_accounts.add(account_key)
                         accounts.append({
-                            'type': 'Azure Account',
-                            'username': result.get('sAMAccountName', ''),
+                            'type': 'Azure-related Account',
+                            'username': username,
                             'spn': result.get('servicePrincipalName', ''),
                             'description': result.get('description', '')
                         })
-                        self.logger.warning(f"[!] Found Azure-related account: {result.get('sAMAccountName', '')}")
+                        self.logger.warning(f"[!] Found Azure-related account: {username}")
                         
                 except Exception:
                     continue
@@ -154,7 +210,7 @@ class AzureChecker:
                     'description': result.get('description', '')
                 })
                 self.logger.warning(f"[!] Found MSOL account: {username}")
-                self.logger.warning("[!] MSOL accounts have DCSync privileges by design (expected) - high-value target if the AAD Connect server is compromised")
+                self.logger.warning("[!] MSOL/AD DS Connector accounts may have DCSync-equivalent replication rights depending on enabled sync features - high-value target; verify ACLs")
                 
         except Exception as e:
             self.logger.error(f"[-] Error checking MSOL accounts: {e}")
@@ -272,8 +328,9 @@ class AzureChecker:
                 search_base=self.base_dn,
                 search_filter='(&(objectClass=computer)(sAMAccountName=AZUREADSSOACC$))',
                 attributes=[
-                    'sAMAccountName', 'userAccountControl', 'pwdLastSet',
-                    'msDS-AllowedToDelegateTo', 'msDS-AllowedToActOnBehalfOfOtherIdentity'
+                    'sAMAccountName', 'servicePrincipalName', 'userAccountControl', 'pwdLastSet',
+                    'msDS-AllowedToDelegateTo', 'msDS-AllowedToActOnBehalfOfOtherIdentity',
+                    'msDS-SupportedEncryptionTypes'
                 ]
             )
             
@@ -286,72 +343,13 @@ class AzureChecker:
             account_name = account.get('sAMAccountName', 'AZUREADSSOACC$')
             
             self.logger.warning(f"[!] Found {account_name} - checking security configuration")
-            
-            # Check 1: Unconstrained Kerberos delegation disabled (TRUSTED_FOR_DELEGATION = 524288)
-            uac = account.get('userAccountControl', 0)
-            if isinstance(uac, str):
-                uac = int(uac)
-            
-            if uac & 524288:  # TRUSTED_FOR_DELEGATION
-                self.logger.finding(f"AZUREADSSOACC has Kerberos delegation ENABLED (vulnerable!)")
-                findings.append("CRITICAL: Kerberos delegation is ENABLED on AZUREADSSOACC - should be disabled")
-            else:
-                self.logger.success("[+] AZUREADSSOACC has Kerberos delegation disabled")
-            
-            # Check 2: Constrained delegation (msDS-AllowedToDelegateTo)
-            allowed_to_delegate = account.get('msDS-AllowedToDelegateTo')
-            if allowed_to_delegate:
-                self.logger.finding("AZUREADSSOACC has constrained delegation configured")
-                if isinstance(allowed_to_delegate, list):
-                    for target in allowed_to_delegate:
-                        findings.append(f"CRITICAL: Constrained delegation to: {target}")
-                else:
-                    findings.append(f"CRITICAL: Constrained delegation to: {allowed_to_delegate}")
-            else:
-                self.logger.success("[+] AZUREADSSOACC has no constrained delegation")
-            
-            # Check 3: Resource-based constrained delegation (msDS-AllowedToActOnBehalfOfOtherIdentity)
-            rbcd = account.get('msDS-AllowedToActOnBehalfOfOtherIdentity')
-            if rbcd:
-                self.logger.finding("AZUREADSSOACC has RBCD configured - other accounts can delegate to it!")
-                findings.append("CRITICAL: RBCD is configured - other accounts have delegation permissions to AZUREADSSOACC")
-            else:
-                self.logger.success("[+] No RBCD configured on AZUREADSSOACC")
-            
-            # Check 4: Kerberos decryption key age (derived from computer account password)
-            # Microsoft recommends renewing at least every 30 days via pwdLastSet
-            pwd_last_set = account.get('pwdLastSet')
-            if pwd_last_set:
-                try:
-                    # pwdLastSet is Windows FILETIME (100-nanosecond intervals since 1601-01-01)
-                    if isinstance(pwd_last_set, str):
-                        pwd_last_set = int(pwd_last_set)
-                    
-                    if pwd_last_set > 0:
-                        # Convert Windows FILETIME to datetime
-                        # FILETIME epoch is 1601-01-01, Unix epoch is 1970-01-01
-                        # Difference is 116444736000000000 (100-nanosecond intervals)
-                        windows_epoch_diff = 116444736000000000
-                        unix_timestamp = (pwd_last_set - windows_epoch_diff) / 10000000
-                        pwd_date = datetime.fromtimestamp(unix_timestamp)
-                        
-                        age_days = (datetime.now() - pwd_date).days
-                        
-                        if age_days > 30:
-                            self.logger.finding(f"AZUREADSSOACC Kerberos key is {age_days} days old (should be renewed every 30 days)")
-                            findings.append(f"WARNING: Kerberos decryption key is {age_days} days old - Microsoft recommends renewal every 30 days")
-                            findings.append(f"Last password change: {pwd_date.strftime('%Y-%m-%d')}")
-                        else:
-                            self.logger.success(f"[+] AZUREADSSOACC Kerberos key is {age_days} days old (within 30-day window)")
-                    else:
-                        self.logger.warning("[!] AZUREADSSOACC password never set or set to never expire")
-                        findings.append("WARNING: Password appears to never have been set")
-                        
-                except Exception as e:
-                    self.logger.debug(f"Could not parse pwdLastSet: {e}")
-            
-            # Check 5: Check if any other accounts have delegation to AZUREADSSOACC
-            self._check_delegation_to_azureadssoacc(findings)
+
+            self._check_azureadssoacc_uac_delegation(account, findings)
+            self._check_azureadssoacc_constrained_delegation(account, findings)
+            self._check_azureadssoacc_rbcd(account, findings)
+            self._check_azureadssoacc_key_age(account, findings)
+            self._check_azureadssoacc_encryption(account, findings)
+            self._check_delegation_to_azureadssoacc(account, findings)
             
             # Write findings
             if findings:
@@ -361,28 +359,125 @@ class AzureChecker:
                     self.output_paths['findings'] / 'azureadssoacc_security.txt'
                 )
             else:
-                self.logger.success("[+] AZUREADSSOACC security configuration is correct")
+                self.logger.success("[+] No AZUREADSSOACC issues found in checked settings")
                 
         except Exception as e:
             self.logger.error(f"[-] Error checking AZUREADSSOACC security: {e}")
+
+    def _check_azureadssoacc_uac_delegation(self, account: Dict, findings: List[str]):
+        """Check delegation-related userAccountControl flags on AZUREADSSOACC."""
+        uac = _coerce_int(account.get('userAccountControl')) or 0
+
+        if uac & TRUSTED_FOR_DELEGATION:
+            self.logger.finding(f"AZUREADSSOACC has unconstrained Kerberos delegation ENABLED (vulnerable!)")
+            findings.append("CRITICAL: Unconstrained Kerberos delegation is ENABLED on AZUREADSSOACC - should be disabled")
+        else:
+            self.logger.success("[+] AZUREADSSOACC is not trusted for unconstrained Kerberos delegation")
+
+        if uac & TRUSTED_TO_AUTH_FOR_DELEGATION:
+            self.logger.finding("AZUREADSSOACC is trusted to authenticate for delegation")
+            findings.append("CRITICAL: TRUSTED_TO_AUTH_FOR_DELEGATION is set on AZUREADSSOACC - delegation should be disabled")
+        else:
+            self.logger.success("[+] AZUREADSSOACC is not trusted to authenticate for delegation")
+
+    def _check_azureadssoacc_constrained_delegation(self, account: Dict, findings: List[str]):
+        """Check constrained delegation targets configured on AZUREADSSOACC itself."""
+        allowed_to_delegate = _as_list(account.get('msDS-AllowedToDelegateTo'))
+        if allowed_to_delegate:
+            self.logger.finding("AZUREADSSOACC has constrained delegation configured")
+            for target in allowed_to_delegate:
+                findings.append(f"CRITICAL: Constrained delegation to: {target}")
+        else:
+            self.logger.success("[+] AZUREADSSOACC has no constrained delegation targets")
+
+    def _check_azureadssoacc_rbcd(self, account: Dict, findings: List[str]):
+        """Check resource-based constrained delegation on AZUREADSSOACC."""
+        rbcd = account.get('msDS-AllowedToActOnBehalfOfOtherIdentity')
+        if rbcd:
+            self.logger.finding("AZUREADSSOACC has RBCD configured - other accounts can delegate to it!")
+            findings.append("CRITICAL: RBCD is configured - other accounts have delegation permissions to AZUREADSSOACC")
+        else:
+            self.logger.success("[+] No RBCD configured on AZUREADSSOACC")
+
+    def _check_azureadssoacc_key_age(self, account: Dict, findings: List[str]):
+        """Check AZUREADSSOACC Kerberos decryption key age."""
+        pwd_last_set = account.get('pwdLastSet')
+        pwd_date = _coerce_ad_datetime(pwd_last_set)
+        if pwd_date:
+            now = datetime.now(pwd_date.tzinfo) if pwd_date.tzinfo else datetime.now()
+            age_days = (now - pwd_date).days
+
+            if age_days > 30:
+                self.logger.finding(f"AZUREADSSOACC Kerberos key is {age_days} days old (should be renewed every 30 days)")
+                findings.append(f"WARNING: Kerberos decryption key is {age_days} days old - Microsoft recommends renewal every 30 days")
+                findings.append(f"Last password change: {pwd_date.strftime('%Y-%m-%d')}")
+            else:
+                self.logger.success(f"[+] AZUREADSSOACC Kerberos key is {age_days} days old (within 30-day window)")
+        elif pwd_last_set in (0, "0"):
+            self.logger.warning("[!] AZUREADSSOACC password never set")
+            findings.append("WARNING: Password appears to never have been set")
+        else:
+            self.logger.warning("[!] AZUREADSSOACC pwdLastSet not available or could not be parsed - Kerberos key age not checked")
+            findings.append("WARNING: Kerberos key age could not be checked because pwdLastSet was not available or parseable")
+
+    def _check_azureadssoacc_encryption(self, account: Dict, findings: List[str]):
+        """Check AZUREADSSOACC Kerberos encryption types."""
+        encryption_types = _coerce_int(account.get('msDS-SupportedEncryptionTypes'))
+        if encryption_types is None:
+            self.logger.warning("[!] AZUREADSSOACC msDS-SupportedEncryptionTypes not available - Kerberos encryption type not checked")
+            return
+
+        if encryption_types == 0:
+            self.logger.warning("[!] AZUREADSSOACC Kerberos encryption type is not explicitly configured - verify AES is used")
+            findings.append("WARNING: Kerberos encryption type is not explicitly configured; verify AZUREADSSOACC uses AES instead of RC4")
+        elif encryption_types & KERBEROS_ENCTYPE_AES:
+            if encryption_types & KERBEROS_ENCTYPE_RC4:
+                self.logger.warning("[!] AZUREADSSOACC supports AES but RC4 is still allowed - consider AES-only")
+                findings.append("WARNING: AZUREADSSOACC supports AES but RC4 is still allowed; Microsoft recommends AES-based encryption instead of RC4")
+            else:
+                self.logger.success("[+] AZUREADSSOACC uses AES Kerberos encryption types")
+        else:
+            self.logger.finding("AZUREADSSOACC does not advertise AES Kerberos encryption types")
+            findings.append("WARNING: AZUREADSSOACC does not advertise AES Kerberos encryption types; Microsoft recommends AES-based encryption instead of RC4")
     
-    def _check_delegation_to_azureadssoacc(self, findings: List[str]):
-        """Check if any accounts have constrained delegation permissions to AZUREADSSOACC."""
+    def _check_delegation_to_azureadssoacc(self, account: Dict, findings: List[str]):
+        """Check if any accounts have constrained delegation to AZUREADSSOACC SPNs."""
         try:
-            # Search for accounts with constrained delegation to AZUREADSSOACC
+            account_name = account.get('sAMAccountName', 'AZUREADSSOACC$')
+            spns = _as_list(account.get('servicePrincipalName'))
+            if not spns:
+                self.logger.warning("[!] AZUREADSSOACC servicePrincipalName not available - delegation-to-account check is incomplete")
+                findings.append("WARNING: Delegation to AZUREADSSOACC could not be checked because servicePrincipalName was not available")
+                return
+
+            spn_filter = _ldap_or_filter('msDS-AllowedToDelegateTo', spns)
             results = self.ldap.query(
                 search_base=self.base_dn,
-                search_filter='(msDS-AllowedToDelegateTo=*AZUREADSSOACC*)',
+                search_filter=spn_filter,
                 attributes=['sAMAccountName', 'msDS-AllowedToDelegateTo', 'objectClass']
             )
-            
-            if results:
-                self.logger.finding(f"{len(results)} accounts have constrained delegation to AZUREADSSOACC")
-                for result in results:
-                    account_name = result.get('sAMAccountName', 'Unknown')
-                    findings.append(f"CRITICAL: {account_name} has constrained delegation permissions to AZUREADSSOACC")
+
+            spn_lookup = {str(spn).lower() for spn in spns}
+            delegated_accounts = []
+            for result in results:
+                delegate_name = result.get('sAMAccountName', 'Unknown')
+                if delegate_name.lower() == account_name.lower():
+                    continue
+
+                delegated_spns = [
+                    spn for spn in _as_list(result.get('msDS-AllowedToDelegateTo'))
+                    if str(spn).lower() in spn_lookup
+                ]
+                if delegated_spns:
+                    delegated_accounts.append((delegate_name, delegated_spns))
+
+            if delegated_accounts:
+                self.logger.finding(f"{len(delegated_accounts)} accounts have constrained delegation to AZUREADSSOACC SPNs")
+                for delegate_name, delegated_spns in delegated_accounts:
+                    spn_text = ', '.join(str(spn) for spn in delegated_spns)
+                    findings.append(f"CRITICAL: {delegate_name} has constrained delegation to AZUREADSSOACC SPN(s): {spn_text}")
             else:
-                self.logger.success("[+] No accounts have constrained delegation to AZUREADSSOACC")
+                self.logger.success("[+] No accounts have constrained delegation to AZUREADSSOACC SPNs")
                 
         except Exception as e:
             self.logger.debug(f"Error checking delegation to AZUREADSSOACC: {e}")
