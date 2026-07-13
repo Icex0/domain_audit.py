@@ -59,6 +59,12 @@ class AzureChecker:
         self.output_paths = output_paths
         self.logger = get_logger()
         self.base_dn = ldap_conn.config.base_dn
+
+    def run_all_checks(self):
+        """Run all Azure/Entra-related checks."""
+        self.check_azure_ad_connect()
+        self.check_azure_ad_connect_server()
+        self.check_azureadssoacc_security()
     
     def check_azure_ad_connect(self):
         """Check for Azure AD Connect installation and configuration."""

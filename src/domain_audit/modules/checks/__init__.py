@@ -53,7 +53,7 @@ AVAILABLE_CHECKS = {
     'exchange': ('Exchange configuration', 'exchange_checker', 'check_exchange'),
     'adcs': ('AD Certificate Services', 'adcs_checker', 'check_adcs'),
     'trusts': ('Domain trusts', 'trust_checker', 'check_trusts'),
-    'azure': ('Azure AD Connect', 'azure_checker', 'check_azure_ad_connect'),
+    'azure': ('Azure/Entra Connect and AZUREADSSOACC', 'azure_checker', 'run_all_checks'),
     'sccm': ('SCCM/MECM configuration', 'sccm_checker', 'check_sccm'),
     'ldap': ('LDAP security settings', 'ldap_checker', 'check_ldap'),
     'ldap-anonymous-bind': ('LDAP anonymous (unauthenticated) bind check', 'ldap_checker', '_check_ldap_anonymous_bind'),
@@ -203,9 +203,7 @@ class SecurityChecker:
         # Phase 7 checks
         self.logger.section("SECURITY CHECKS - PART 5")
         self.trust_checker.check_trusts()
-        self.azure_checker.check_azure_ad_connect()
-        self.azure_checker.check_azure_ad_connect_server()
-        self.azure_checker.check_azureadssoacc_security()
+        self.azure_checker.run_all_checks()
         self.sccm_checker.check_sccm()
         self.wsus_checker.check_wsus()
         
