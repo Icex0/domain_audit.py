@@ -1,12 +1,54 @@
 """Azure AD Connect checks."""
 
+import re
 from datetime import datetime, timedelta
-from typing import Dict, List
+from typing import Dict, List, Optional
 from pathlib import Path
 
 from ...utils.logger import get_logger
 from ...utils.ldap import LDAPConnection
 from ...utils.output import write_csv, write_file, write_lines
+
+
+_CONNECT_SERVER_PATTERNS = [
+    r"\brunning\s+on\s+computer\s+([A-Za-z0-9][A-Za-z0-9._-]*)",
+    r"\bserver\s*:\s*([A-Za-z0-9][A-Za-z0-9._-]*)",
+]
+_CONNECT_SERVER_TRAILING_PUNCTUATION = ".,;:)]}"
+
+
+def _extract_connect_server_reference(description: str) -> Optional[str]:
+    if not isinstance(description, str) or not description:
+        return None
+
+    for pattern in _CONNECT_SERVER_PATTERNS:
+        match = re.search(pattern, description, re.IGNORECASE)
+        if match:
+            return match.group(1).rstrip(_CONNECT_SERVER_TRAILING_PUNCTUATION)
+
+    return None
+
+
+def _format_connect_server_references(references: List[Dict[str, str]]) -> str:
+    sections = []
+    for ref in references:
+        sections.append(
+            "\n".join([
+                f"Microsoft Entra Connect Server Reference: {ref['server']}",
+                f"AD DS Connector Account: {ref['account']}",
+                f"Description: {ref['description']}",
+                "",
+                "Evidence scope:",
+                (
+                    "The LDAP account description references this server as the computer "
+                    "associated with the Connect installation. This does not confirm that "
+                    "the ADSync service is currently installed, running, or synchronizing "
+                    "successfully."
+                ),
+            ])
+        )
+
+    return "\n\n".join(sections) + "\n"
 
 
 class AzureChecker:
@@ -156,41 +198,55 @@ class AzureChecker:
         return groups
     
     def check_azure_ad_connect_server(self):
-        """Check which server hosts Azure AD Connect."""
-        self.logger.info("---Checking for Azure AD Connect server---")
+        """Check MSOL account descriptions for Microsoft Entra Connect server references."""
+        self.logger.info("---Checking for Microsoft Entra Connect server reference---")
         
         try:
-            # Check for computers with MSOL service accounts
-            # The MSOL account name format is: MSOL_<installation_id>
+            # The MSOL account name format is usually MSOL_<installation_id>.
+            # Custom installations may use an administrator-created connector account.
             results = self.ldap.query(
                 search_base=self.base_dn,
                 search_filter='(sAMAccountName=MSOL_*)',
                 attributes=['sAMAccountName', 'description']
             )
-            
-            server_found = False
-            
+
+            if not results:
+                self.logger.info("[*] No MSOL-prefixed AD DS Connector accounts found")
+                self.logger.info("[*] Custom Microsoft Entra Connect installations may use a connector account without an MSOL_ prefix")
+                return
+
+            references = []
+            seen_servers = set()
             for result in results:
-                # MSOL account description often contains the server name
                 description = result.get('description', '')
-                if description and 'Server:' in description:
-                    server_name = description.split('Server:')[1].strip().split()[0]
-                    self.logger.finding(f"Azure AD Connect installed on: {server_name}")
-                    server_found = True
-                    
-                    write_file(
-                        f"Azure AD Connect Server: {server_name}\n"
-                        f"Service Account: {result.get('sAMAccountName', '')}\n\n"
-                        "Check if you have access to this server to extract credentials.",
-                        self.output_paths['findings'] / 'azure_ad_connect_server.txt',
-                        self.logger
-                    )
-            
-            if not server_found:
-                self.logger.success("[+] No Azure AD Connect server detected")
+                server_name = _extract_connect_server_reference(description)
+                if not server_name:
+                    continue
+
+                server_key = server_name.lower()
+                if server_key in seen_servers:
+                    continue
+
+                seen_servers.add(server_key)
+                references.append({
+                    'server': server_name,
+                    'account': result.get('sAMAccountName', '') or 'Unknown',
+                    'description': description,
+                })
+                self.logger.warning(f"[!] Microsoft Entra Connect server reference found: {server_name}")
+
+            if references:
+                write_file(
+                    _format_connect_server_references(references),
+                    self.output_paths['findings'] / 'azure_ad_connect_server.txt',
+                    self.logger
+                )
+            else:
+                self.logger.info("[*] No Microsoft Entra Connect server reference could be extracted from MSOL account descriptions")
+                self.logger.info("[*] Custom Microsoft Entra Connect installations may use a connector account without an MSOL_ prefix")
                     
         except Exception as e:
-            self.logger.error(f"[-] Error checking Azure AD Connect server: {e}")
+            self.logger.error(f"[-] Error checking Microsoft Entra Connect server reference: {e}")
     
     def check_azureadssoacc_security(self):
         """Check AZUREADSSOACC computer account security.
