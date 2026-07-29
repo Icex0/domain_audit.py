@@ -84,7 +84,6 @@ class PasswordChecker:
             else:
                 self.logger.success(f"[+] LockOutBadCount is {lockout_threshold}")
             
-            filepath = self.output_paths['findings'] / 'passwordpolicy.txt'
             policy_lines = [
                 "Password Policy:",
                 f"  Minimum Password Length: {policy.get('minPwdLength', 'N/A')}",
@@ -109,6 +108,12 @@ class PasswordChecker:
             for key, value in policy.items():
                 if key != 'dn':
                     policy_lines.append(f"  {key}: {value}")
+
+            # Only report as a finding if the policy is actually weak
+            if findings:
+                filepath = self.output_paths['findings'] / 'passwordpolicy.txt'
+            else:
+                filepath = self.output_paths['checks'] / 'passwordpolicy.txt'
             write_file('\n'.join(policy_lines), filepath, self.logger)
                 
         except Exception as e:

@@ -137,8 +137,8 @@ class AzureChecker:
             findings.extend(sync_groups)
         
         if findings:
-            self.logger.warning("[!] Microsoft Entra Connect indicators found - review configuration, patch level, and connector-account privileges")
-            write_csv(findings, self.output_paths['findings'] / 'azure_ad_connect.txt')
+            self.logger.info("[*] Microsoft Entra Connect indicators found - review configuration, patch level, and connector-account privileges")
+            write_csv(findings, self.output_paths['checks'] / 'azure_ad_connect.txt')
         else:
             self.logger.success("[+] No Microsoft Entra Connect indicators detected by these LDAP checks")
     
@@ -295,12 +295,12 @@ class AzureChecker:
                     'account': result.get('sAMAccountName', '') or 'Unknown',
                     'description': description,
                 })
-                self.logger.warning(f"[!] Microsoft Entra Connect server reference found: {server_name}")
+                self.logger.info(f"[*] Microsoft Entra Connect server reference found: {server_name}")
 
             if references:
                 write_file(
                     _format_connect_server_references(references),
-                    self.output_paths['findings'] / 'azure_ad_connect_server.txt',
+                    self.output_paths['checks'] / 'azure_ad_connect_server.txt',
                     self.logger
                 )
             else:

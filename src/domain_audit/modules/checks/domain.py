@@ -60,6 +60,7 @@ class DomainChecker:
                 write_file('\n'.join(output_lines), filepath_findings, self.logger)
             else:
                 self.logger.success(f"[+] The domain functional level is {level_name}")
+                write_file('\n'.join(output_lines), filepath_checks, self.logger)
                 
         except Exception as e:
             self.logger.error(f"[-] Error checking domain functional level: {e}")

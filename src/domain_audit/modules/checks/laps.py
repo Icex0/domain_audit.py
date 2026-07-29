@@ -301,7 +301,11 @@ class LAPSChecker:
         for key, value in laps_settings.items():
             policy_lines.append(f"  {key}: {value}")
         
-        filepath = self.output_paths['findings'] / 'laps_policy.txt'
+        # Only report as a finding if the policy is actually weak
+        if findings:
+            filepath = self.output_paths['findings'] / 'laps_policy.txt'
+        else:
+            filepath = self.output_paths['checks'] / 'laps_policy.txt'
         write_file('\n'.join(policy_lines), filepath, self.logger)
     
     def _check_laps_schema(self) -> dict:
