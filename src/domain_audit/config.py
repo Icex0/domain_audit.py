@@ -114,10 +114,15 @@ WIN10_LONG_TERM_SUPPORT = [
 ]
 
 # Windows 11 End of Service versions (build numbers)
-WIN11_EOS_VERSIONS = ['22000', '22621']
+WIN11_EOS_VERSIONS = ['22000', '22621', '22631', '26100', '26200', '28000']
+
 WIN11_VERSION_NAMES = {
     '22000': '21H2',
-    '22621': '22H2'
+    '22621': '22H2',
+    '22631': '23H2',
+    '26100': '24H2',
+    '26200': '25H2',
+    '28000': '26H1'
 }
 
 # SYSVOL password search keywords (checked in XML files under Policies)
