@@ -114,7 +114,7 @@ WIN10_LONG_TERM_SUPPORT = [
 ]
 
 # Windows 11 End of Service versions (build numbers)
-WIN11_EOS_VERSIONS = ['22000', '22621', '22631', '26100', '26200', '28000']
+WIN11_EOS_VERSIONS = ['22000', '22621', '22631']
 
 WIN11_VERSION_NAMES = {
     '22000': '21H2',
