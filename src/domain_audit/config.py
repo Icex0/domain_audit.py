@@ -63,6 +63,8 @@ EOL_OS_PATTERNS = [
     'Windows 8',
     'Windows Server 2008',
     'Windows Server 2003',
+    'Windows Server 2012',
+    'Windows Server 2016',
     'XP'
 ]
 
