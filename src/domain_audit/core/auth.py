@@ -11,6 +11,7 @@ from ldap3.core.exceptions import LDAPBindError, LDAPSocketOpenError
 
 from ..utils.logger import get_logger
 from ..utils.dc import check_dc_reachable
+from ..utils.ldap import ntlm_session_options
 from .exceptions import ConnectionError
 
 
@@ -103,7 +104,8 @@ class ADAuthManager:
                     user=self.creds.domain_username,
                     password=self.creds.nt_hash,
                     authentication=NTLM,
-                    auto_bind=AUTO_BIND_NONE
+                    auto_bind=AUTO_BIND_NONE,
+                    **ntlm_session_options(self.creds.use_ldaps)
                 )
             else:
                 # Password authentication
@@ -112,7 +114,8 @@ class ADAuthManager:
                     user=self.creds.domain_username,
                     password=self.creds.password,
                     authentication=NTLM,
-                    auto_bind=AUTO_BIND_NONE
+                    auto_bind=AUTO_BIND_NONE,
+                    **ntlm_session_options(self.creds.use_ldaps)
                 )
             
             if conn.bind():

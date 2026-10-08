@@ -23,13 +23,24 @@ except ValueError:
     
     hashlib.new = _patched_hashlib_new
 
-from ldap3 import Server, Connection, NTLM, SUBTREE, ALL_ATTRIBUTES
+from ldap3 import Server, Connection, NTLM, SUBTREE, ALL_ATTRIBUTES, ENCRYPT, TLS_CHANNEL_BINDING
 from ldap3.core.exceptions import (
     LDAPBindError, LDAPSocketOpenError, LDAPException, LDAPCommunicationError
 )
 
 from ..utils.logger import get_logger
 from ..core.exceptions import ConnectionError, EnumerationError
+
+
+def ntlm_session_options(use_ldaps: bool) -> Dict[str, str]:
+    """Extra Connection kwargs so NTLM binds satisfy hardened DCs.
+
+    Plain LDAP gets NTLM sealing (implies signing) for "Require signing" DCs;
+    LDAPS gets channel binding instead, since TLS already protects the session.
+    """
+    if use_ldaps:
+        return {"channel_binding": TLS_CHANNEL_BINDING}
+    return {"session_security": ENCRYPT}
 
 
 @dataclass
@@ -72,14 +83,15 @@ class LDAPConnection:
                 use_ssl=self.config.use_ldaps,
                 get_info='ALL'
             )
-            
+
             self.connection = Connection(
                 server,
                 user=self.config.domain_username,
                 password=self.config.password,
                 authentication=NTLM,
                 auto_bind=True,
-                raise_exceptions=True
+                raise_exceptions=True,
+                **ntlm_session_options(self.config.use_ldaps)
             )
             
             self.logger.log_verbose(f"Connected to LDAP server {self.config.server}")

