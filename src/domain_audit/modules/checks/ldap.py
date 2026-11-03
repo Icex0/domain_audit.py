@@ -156,6 +156,7 @@ class LDAPChecker:
         
         all_results = []
         vulnerable_dcs = []
+        completed_checks = 0
         
         for dc in dcs:
             hostname = dc.get('dNSHostName', '')
@@ -168,7 +169,8 @@ class LDAPChecker:
             
             try:
                 cmd = ['netexec', 'ldap', hostname, '-u', self.username, '-p', self.password]
-                self.logger.debug(f"[*] Running: {' '.join(cmd)}")
+                # Avoid exposing credentials in debug logs.
+                self.logger.debug(f"[*] Running netexec ldap against {hostname}")
                 
                 result = subprocess.run(
                     cmd,
@@ -187,42 +189,43 @@ class LDAPChecker:
                 
                 # Parse the banner line for signing and channel binding
                 # Example: (signing:None) (channel binding:Never)
-                signing_match = re.search(r'\(signing:(\w+)\)', output)
-                binding_match = re.search(r'\(channel binding:(\w+)\)', output)
+                signing_match = re.search(r'\(signing:\s*([^)]+)\)', output, re.I)
+                binding_match = re.search(r'\(channel binding:\s*([^)]+)\)', output, re.I)
                 
-                signing = signing_match.group(1) if signing_match else None
-                binding = binding_match.group(1) if binding_match else None
-                
+                # NetExec uses Enforced/None/Unknown for signing and
+                # Always/When Supported/Never/No TLS cert for channel binding.
+                signing = signing_match.group(1).strip().lower() if signing_match else None
+                binding = binding_match.group(1).strip().lower() if binding_match else None
+
                 results = [f"Domain Controller: {name} ({hostname})"]
-                
-                # Check LDAP signing
-                if signing:
-                    if signing.lower() == 'true':
-                        self.logger.success(f"[+] {name}: LDAP signing IS enforced")
-                        results.append("LDAP signing: ENFORCED")
-                    else:
-                        self.logger.finding(f"{name}: LDAP signing NOT enforced")
-                        results.append("LDAP signing: NOT ENFORCED")
-                        vulnerable_dcs.append(f"{name}: LDAP signing not enforced")
+                if signing in ('enforced', 'true', 'none', 'false'):
+                    completed_checks += 1
+
+                # Only report a vulnerability for an explicitly insecure state.
+                if signing in ('enforced', 'true'):
+                    self.logger.success(f"[+] {name}: LDAP signing IS enforced")
+                    results.append("LDAP signing: ENFORCED")
+                elif signing in ('none', 'false'):
+                    self.logger.finding(f"{name}: LDAP signing NOT enforced")
+                    results.append("LDAP signing: NOT ENFORCED")
+                    vulnerable_dcs.append(f"{name}: LDAP signing not enforced")
                 else:
                     self.logger.warning(f"[!] {name}: Could not determine LDAP signing")
                     results.append("LDAP signing: UNKNOWN")
-                
-                # Check LDAPS channel binding
-                if binding:
-                    if binding.lower() == 'required':
-                        self.logger.success(f"[+] {name}: LDAPS channel binding REQUIRED")
-                        results.append("LDAPS channel binding: REQUIRED")
-                    elif binding.lower() == 'never':
-                        self.logger.finding(f"{name}: LDAPS channel binding NEVER - relay attacks possible")
-                        results.append("LDAPS channel binding: NEVER (vulnerable to relay)")
-                        vulnerable_dcs.append(f"{name}: LDAPS channel binding set to Never")
-                    elif binding.lower() in ('supported', 'when_supported'):
-                        self.logger.warning(f"[!] {name}: LDAPS channel binding WHEN SUPPORTED")
-                        results.append("LDAPS channel binding: WHEN SUPPORTED")
-                    else:
-                        self.logger.info(f"[*] {name}: LDAPS channel binding: {binding}")
-                        results.append(f"LDAPS channel binding: {binding}")
+
+                if binding in ('always', 'required'):
+                    self.logger.success(f"[+] {name}: LDAPS channel binding REQUIRED")
+                    results.append("LDAPS channel binding: REQUIRED")
+                elif binding == 'never':
+                    self.logger.finding(f"{name}: LDAPS channel binding NEVER - relay attacks possible")
+                    results.append("LDAPS channel binding: NEVER (vulnerable to relay)")
+                    vulnerable_dcs.append(f"{name}: LDAPS channel binding set to Never")
+                elif binding in ('when supported', 'when_supported', 'supported'):
+                    self.logger.warning(f"[!] {name}: LDAPS channel binding WHEN SUPPORTED")
+                    results.append("LDAPS channel binding: WHEN SUPPORTED")
+                elif binding == 'no tls cert':
+                    self.logger.warning(f"[!] {name}: LDAPS channel binding could not be tested (No TLS cert)")
+                    results.append("LDAPS channel binding: UNKNOWN (No TLS cert)")
                 else:
                     self.logger.warning(f"[!] {name}: Could not determine LDAPS channel binding")
                     results.append("LDAPS channel binding: UNKNOWN")
@@ -247,9 +250,13 @@ class LDAPChecker:
         if all_results:
             write_lines(all_results, self.output_paths['data'] / 'ldap_checks.txt')
         
-        # Write findings if vulnerable
+        # Remove outdated results from an earlier run only when all DCs
+        # returned a recognizable signing status.
+        findings_path = self.output_paths['findings'] / 'ldap_vulnerabilities.txt'
         if vulnerable_dcs:
-            write_lines(vulnerable_dcs, self.output_paths['findings'] / 'ldap_vulnerabilities.txt')
+            write_lines(vulnerable_dcs, findings_path)
+        elif completed_checks == len(dcs) and completed_checks > 0:
+            findings_path.unlink(missing_ok=True)
     
     def _check_sysvol_passwords(self):
         """Check for passwords in SYSVOL share using impacket."""
