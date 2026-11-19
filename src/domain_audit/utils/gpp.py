@@ -79,3 +79,32 @@ def find_cpasswords(content: bytes) -> List[Dict[str, str]]:
             'password': decrypt_cpassword(cpassword) or '',
         })
     return results
+
+
+def find_autologon(content: bytes) -> List[Dict[str, str]]:
+    """Return autologon credentials from a GPP Registry.xml.
+
+    GPP registry items for Winlogon AutoAdminLogon store DefaultPassword in
+    cleartext (no cpassword encryption). Items are <Properties name=".."
+    value=".."/> elements; values are grouped per Registry.xml file.
+    Returns [{'user', 'domain', 'password'}] when a non-empty DefaultPassword exists.
+    """
+    text = _decode(content)
+    try:
+        root = ET.fromstring(text)
+    except ET.ParseError:
+        return []
+    values: Dict[str, List[str]] = {}
+    for el in root.iter():
+        if el.tag.split('}')[-1] != 'Properties':
+            continue
+        name = (el.attrib.get('name') or '').lower()
+        if name in ('defaultpassword', 'defaultusername', 'defaultdomainname'):
+            values.setdefault(name, []).append(el.attrib.get('value', ''))
+    passwords = [p for p in values.get('defaultpassword', []) if p]
+    if not passwords:
+        return []
+    users = values.get('defaultusername', []) or ['']
+    domains = values.get('defaultdomainname', []) or ['']
+    return [{'user': users[min(i, len(users) - 1)], 'domain': domains[min(i, len(domains) - 1)], 'password': pw}
+            for i, pw in enumerate(passwords)]

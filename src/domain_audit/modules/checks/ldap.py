@@ -16,7 +16,7 @@ from impacket.dcerpc.v5 import transport, rprn
 from ...utils.logger import get_logger
 from ...utils.ldap import LDAPConnection
 from ...utils.output import write_lines
-from ...utils.gpp import find_cpasswords
+from ...utils.gpp import find_cpasswords, find_autologon
 from ...utils.dc import select_reachable_dc
 from ...config import SYSVOL_PASSWORD_KEYWORDS, NETLOGON_PASSWORD_KEYWORDS
 
@@ -293,6 +293,7 @@ class LDAPChecker:
             conn.login(self.username, self.password, self.domain)
             
             gpp_findings = []
+            autologon_findings = []
             keyword_hits = []
             xml_count = 0
             for file_path in self._walk_share(conn, 'SYSVOL', f"{self.domain}/Policies"):
@@ -303,9 +304,18 @@ class LDAPChecker:
                 if not content:
                     continue
                 
+                found_credentials = False
                 for entry in find_cpasswords(content):
                     password = entry['password'] or f"<could not decrypt: {entry['cpassword']}>"
                     gpp_findings.append(f"{file_path}: user '{entry['user'] or '?'}' password '{password}'")
+                    found_credentials = True
+                if file_path.lower().endswith('registry.xml'):
+                    for entry in find_autologon(content):
+                        user = f"{entry['domain']}\\{entry['user']}" if entry['domain'] else (entry['user'] or '?')
+                        autologon_findings.append(f"{file_path}: autologon user '{user}' password '{entry['password']}'")
+                        found_credentials = True
+                if found_credentials:
+                    continue  # already reported with the actual credentials; skip the keyword hit
                 
                 content_lower = content.lower()
                 for keyword in SYSVOL_PASSWORD_KEYWORDS:
@@ -321,6 +331,12 @@ class LDAPChecker:
                 write_lines(gpp_findings, self.output_paths['findings'] / 'sysvol_gpp_passwords.txt')
             else:
                 self.logger.success("[+] No Group Policy Preferences passwords (cpassword) found in SYSVOL")
+            
+            if autologon_findings:
+                self.logger.finding(f"{len(autologon_findings)} cleartext autologon password(s) in Group Policy Preferences (Registry.xml)")
+                write_lines(autologon_findings, self.output_paths['findings'] / 'sysvol_gpp_autologon.txt')
+            else:
+                self.logger.success("[+] No Group Policy Preferences autologon passwords found in SYSVOL")
             
             if keyword_hits:
                 self.logger.warning(f"[!] {len(keyword_hits)} SYSVOL XML files contain password keywords - please check manually")

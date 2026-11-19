@@ -31,6 +31,7 @@ from .wsus import WSUSChecker
 from .dc_vulns import DCVulnsChecker
 from .ntlm import NTLMChecker
 from .dc_rdp import DCRDPChecker
+from .badsuccessor import BadSuccessorChecker
 
 
 # Available checks registry - maps check name to (description, checker_attr, method_name)
@@ -48,6 +49,7 @@ AVAILABLE_CHECKS = {
     'user-attrs': ('User attributes check', 'user_attrs_checker', 'check_user_attributes'),
     'privileged-groups': ('Privileged groups membership', 'privileged_groups_checker', 'check_privileged_groups'),
     'dc-rdp': ('Non-admin RDP logon rights on domain controllers', 'dc_rdp_checker', 'check_dc_rdp'),
+    'badsuccessor': ('BadSuccessor: dMSA creation rights on OUs', 'badsuccessor_checker', 'check_badsuccessor'),
     'outdated': ('EOL OS, inactive/legacy objects, privileged accounts, KRBTGT', 'outdated_checker', 'run_all_checks'),
     'privileged-accounts': ('Privileged account hardening (Protected Users, delegation, KRBTGT/priv password age)', 'outdated_checker', 'check_privileged_accounts'),
     'legacy': ('Legacy access (Pre-Win2000 group/computers, anonymous logon, domain join)', 'outdated_checker', 'check_legacy'),
@@ -142,6 +144,7 @@ class SecurityChecker:
                                        target_scope=self.target_scope,
                                        target_files=self.target_files)
         self.privileged_groups_checker = PrivilegedGroupsChecker(ldap_conn, output_paths)
+        self.badsuccessor_checker = BadSuccessorChecker(ldap_conn, output_paths, domain=domain)
         self.dc_rdp_checker = DCRDPChecker(ldap_conn, output_paths, domain=domain,
                                            username=username, password=password, hashes=hashes)
         self.smb_checker = SMBChecker(ldap_conn, output_paths, domain=domain,
@@ -196,6 +199,7 @@ class SecurityChecker:
         self.user_attrs_checker.check_user_attributes()
         self.privileged_groups_checker.check_privileged_groups()
         self.dc_rdp_checker.check_dc_rdp()
+        self.badsuccessor_checker.check_badsuccessor()
         
         # Phase 6 checks
         self.logger.section("SECURITY CHECKS - PART 3")
@@ -286,5 +290,5 @@ __all__ = [
     'OutdatedChecker', 'ADIDNSChecker', 'ExchangeChecker', 'ADCSChecker',
     'NetworkChecker', 'LDAPChecker', 'TrustChecker', 'AzureChecker', 'SCCMChecker',
     'BloodHoundChecker', 'SQLChecker', 'PrivilegedGroupsChecker', 'SMBChecker',
-    'AccessChecker', 'WSUSChecker', 'DCVulnsChecker', 'NTLMChecker', 'DCRDPChecker'
+    'AccessChecker', 'WSUSChecker', 'DCVulnsChecker', 'NTLMChecker', 'DCRDPChecker', 'BadSuccessorChecker'
 ]

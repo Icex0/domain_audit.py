@@ -55,6 +55,73 @@ class ADIDNSChecker:
         """Run all ADIDNS security checks."""
         can_create = self._check_adidns_permissions()
         self._check_adidns_wildcard(can_create)
+        self._check_dynamic_updates()
+
+    # [MS-DNSP] 2.3.2.1 dnsProperty: DataLength, NameLength, Flag, Version, Id (all
+    # uint32 LE), then Data. Id 0x02 = DSPROPERTY_ZONE_ALLOW_UPDATE with fAllowUpdate:
+    # 0 = no dynamic updates, 1 = nonsecure and secure, 2 = secure only.
+    DSPROPERTY_ZONE_ALLOW_UPDATE = 0x02
+    ZONE_UPDATE_UNSECURE = 0x01
+
+    @classmethod
+    def zone_allow_update(cls, properties) -> Optional[int]:
+        """Return fAllowUpdate from a zone's raw dNSProperty values, or None."""
+        import struct
+        for raw in properties or []:
+            if len(raw) < 20:
+                continue
+            data_len, _name_len, _flag, _version, prop_id = struct.unpack('<5I', raw[:20])
+            if prop_id == cls.DSPROPERTY_ZONE_ALLOW_UPDATE and data_len:
+                return int.from_bytes(raw[20:20 + data_len], 'little')
+        return None
+
+    def _check_dynamic_updates(self):
+        """Find AD-integrated DNS zones that allow nonsecure dynamic updates.
+
+        With "Nonsecure and secure" anyone who can reach the DNS server - no
+        account needed - can register or overwrite records with a plain DNS
+        UPDATE. Microsoft recommends "Secure only" for AD-integrated zones.
+        """
+        self.logger.info("---Checking DNS zones for nonsecure dynamic updates---")
+        try:
+            try:
+                forest_dn = self.ldap.get_config_dn().split(',', 1)[1]
+            except Exception:
+                forest_dn = self.base_dn
+            bases = {
+                'domain': f"DC=DomainDnsZones,{self.base_dn}",
+                'forest': f"DC=ForestDnsZones,{forest_dn}",
+                'legacy (System)': f"CN=MicrosoftDNS,CN=System,{self.base_dn}",
+            }
+            nonsecure, checked = [], 0
+            for label, base in bases.items():
+                try:
+                    self.ldap.connection.search(base, '(objectClass=dnsZone)', ldap3.SUBTREE,
+                                                attributes=['name', 'dNSProperty'])
+                except Exception as e:
+                    self.logger.debug(f"Could not search {base}: {e}")
+                    continue
+                for entry in self.ldap.connection.entries:
+                    raw = entry['dNSProperty'].raw_values if 'dNSProperty' in entry else []
+                    value = self.zone_allow_update(raw)
+                    if value is None:
+                        continue
+                    checked += 1
+                    if value == self.ZONE_UPDATE_UNSECURE:
+                        nonsecure.append(f"{entry['name'].value} ({label} zone)")
+            
+            if nonsecure:
+                self.logger.finding(f"{len(nonsecure)} DNS zone(s) allow nonsecure dynamic updates: {', '.join(nonsecure)}")
+                write_lines(["DNS zones allowing nonsecure dynamic updates (anyone can register/overwrite records):"] +
+                            [f"  - {z}" for z in nonsecure] +
+                            ["", "Recommendation: set dynamic updates to 'Secure only' for AD-integrated zones."],
+                            self.output_paths['findings'] / 'DNS_nonsecure_dynamic_updates.txt')
+            elif checked:
+                self.logger.success(f"[+] None of the {checked} DNS zones allow nonsecure dynamic updates")
+            else:
+                self.logger.info("[*] No DNS zone update settings could be read")
+        except Exception as e:
+            self.logger.error(f"[-] Error checking DNS dynamic update settings: {e}")
 
     def _check_adidns_permissions(self) -> Optional[bool]:
         """Check whether low-privileged principals can add DNS records to the zone.
