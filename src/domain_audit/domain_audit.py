@@ -8,7 +8,7 @@ from typing import Annotated, List, Optional
 import typer
 
 from . import __version__
-from .config import DOMAIN_FUNCTIONAL_LEVELS
+from .config import DOMAIN_FUNCTIONAL_LEVELS, ADMIN_THRESHOLD_PERCENTAGE
 from .core.auth import Credentials, ADAuthManager
 from .core.exceptions import DomainAuditError
 from .utils.logger import get_logger, set_verbose
@@ -460,6 +460,27 @@ def _print_domain_summary(domain_data, paths, domain, enumerator):
     logger.info(f"- {dc_count} Domain Controllers")
     logger.info(f"- {da_count} Domain Admins")
     logger.info(f"- {ea_count} Enterprise Admins")
+    
+    # Share of enabled users that are (nested) Domain/Enterprise Admins - shown as
+    # information; whether that's too many depends on the environment.
+    admins = set()
+    for name in ('list_domainadmins.txt', 'list_enterpriseadmins.txt'):
+        path = paths['data'] / name
+        if path.exists():
+            admins |= {line.strip().lower() for line in path.read_text().splitlines() if line.strip()}
+    enabled = [
+        u.get('sAMAccountName', '').lower() for u in (domain_data.users or [])
+        if u.get('sAMAccountName') and not ((u.get('userAccountControl') or 0) & 2)
+    ]
+    enabled_admins = admins & set(enabled)
+    if enabled:
+        pct = 100 * len(enabled_admins) / len(enabled)
+        message = (f"{len(enabled_admins)} of {len(enabled)} enabled users ({pct:.1f}%) are "
+                   f"Domain/Enterprise Admins (incl. nested)")
+        if pct > ADMIN_THRESHOLD_PERCENTAGE:
+            logger.warning(f"[!] {message} - more than {ADMIN_THRESHOLD_PERCENTAGE:g}%, verify that this many admins are needed")
+        else:
+            logger.info(f"- {message}")
     
     logger.info("")
 

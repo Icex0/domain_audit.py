@@ -51,22 +51,52 @@ class RoastingChecker:
         self._check_asrep_roastable()
     
     def _check_kerberoastable_privileged(self):
-        """Check for kerberoastable privileged users (adminCount=1)."""
+        """Check for kerberoastable privileged users.
+
+        Privileged = (nested) member of Administrators, Domain Admins or Enterprise
+        Admins, or adminCount=1. adminCount alone is unreliable: it stays set after
+        removal from a protected group and isn't set until SDProp runs. The SPN
+        service types are shown (e.g. MSSQLSvc = a SQL Server running as an admin).
+        """
         self.logger.info("---Checking kerberoastable privileged users---")
         
         try:
+            from ldap3.utils.conv import escape_filter_chars
+            domain_sid = self.ldap.get_domain_sid()
+            chain = []
+            for sid in ('S-1-5-32-544', f'{domain_sid}-512', f'{domain_sid}-519'):
+                group = self.ldap.query(self.base_dn, f'(objectSid={sid})', ['distinguishedName'])
+                if group and group[0].get('distinguishedName'):
+                    chain.append(f"(memberOf:1.2.840.113556.1.4.1941:={escape_filter_chars(group[0]['distinguishedName'])})")
+            privileged = f"(|(adminCount=1)(primaryGroupID=512){''.join(chain)})"
             users = self.ldap.query(
                 search_base=self.base_dn,
-                search_filter='(&(objectCategory=person)(objectClass=user)(adminCount=1)(servicePrincipalName=*)(!(userAccountControl:1.2.840.113556.1.4.803:=2)))',
-                attributes=['sAMAccountName', 'servicePrincipalName', 'memberOf']
+                search_filter=('(&(objectCategory=person)(objectClass=user)(servicePrincipalName=*)'
+                               '(!(sAMAccountName=krbtgt))(!(userAccountControl:1.2.840.113556.1.4.803:=2))'
+                               f'{privileged})'),
+                attributes=['sAMAccountName', 'servicePrincipalName', 'memberOf', 'adminCount']
             )
             
             filepath = self.output_paths['findings'] / 'administrators_serviceprincipalname.txt'
             
             if users:
-                count = len(users)
-                self.logger.finding(f"There are {count} kerberoastable privileged users")
-                write_csv(users, filepath, headers=['sAMAccountName', 'servicePrincipalName', 'memberOf'])
+                rows = []
+                for user in users:
+                    spns = user.get('servicePrincipalName') or []
+                    if isinstance(spns, str):
+                        spns = [spns]
+                    services = sorted({spn.split('/')[0] for spn in spns})
+                    rows.append({
+                        'sAMAccountName': user.get('sAMAccountName', ''),
+                        'services': ', '.join(services),
+                        'servicePrincipalName': spns,
+                        'memberOf': user.get('memberOf', ''),
+                    })
+                sql = [r['sAMAccountName'] for r in rows if any(s.lower() == 'mssqlsvc' for s in r['services'].split(', '))]
+                self.logger.finding(f"There are {len(rows)} kerberoastable privileged users")
+                if sql:
+                    self.logger.finding(f"SQL Server service account(s) with admin privileges: {', '.join(sql)}")
+                write_csv(rows, filepath, headers=['sAMAccountName', 'services', 'servicePrincipalName', 'memberOf'])
             else:
                 self.logger.success("[+] No kerberoastable privileged users found")
                 

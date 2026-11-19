@@ -146,6 +146,27 @@ class PrivilegedGroupsChecker:
         self._load_admin_dns()
         for group in PRIVILEGED_GROUPS:
             self._check_group(group)
+        self._check_esx_admins()
+
+    def _check_esx_admins(self):
+        """Information for CVE-2024-37085: domain-joined ESXi (before 8.0 U3) gives
+        full admin to members of a domain group named "ESX Admins", without
+        checking it is the intended group. Whether ESXi hosts are domain-joined
+        can't be seen reliably from LDAP, so this is information only."""
+        try:
+            result = self.ldap.query(self.base_dn, '(&(objectClass=group)(sAMAccountName=ESX Admins))',
+                                     ['distinguishedName'])
+            if result and result[0].get('distinguishedName'):
+                members = self._get_transitive_members(result[0]['distinguishedName'])
+                names = sorted(m.get('sAMAccountName') or m.get('cn') or '' for m in members)
+                self.logger.info(f"[*] 'ESX Admins' group exists with {len(names)} member(s)"
+                                 f"{': ' + ', '.join(names) if names else ''} - members are root on domain-joined "
+                                 "ESXi hosts; check who can modify this group (CVE-2024-37085)")
+            else:
+                self.logger.info("[*] No 'ESX Admins' group - if ESXi hosts are domain-joined (before 8.0 U3), anyone "
+                                 "who can create or rename a group to this name gets root on them (CVE-2024-37085)")
+        except Exception as e:
+            self.logger.debug(f"Could not check ESX Admins group: {e}")
 
     def _check_group(self, group: Dict):
         """Report members of a privileged group that aren't Domain/Enterprise Admins."""

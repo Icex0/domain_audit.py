@@ -55,6 +55,7 @@ class NTLMChecker:
         """Run all NTLM-related security checks."""
         self._check_ntlmv1_support()
         self._check_ntlm_restrictions()
+        self._check_lm_hash_storage()
         self._check_llmnr()
     
     def _check_ntlmv1_support(self):
@@ -406,6 +407,71 @@ class NTLMChecker:
                 
         except Exception as e:
             self.logger.error(f"[-] Error checking NTLM restrictions: {e}")
+    
+    def _check_lm_hash_storage(self):
+        """Check whether a GPO re-enables storing LM hashes (NoLMHash = 0).
+
+        "Network security: Do not store LAN Manager hash value on next password
+        change" (Lsa\\NoLMHash) is enabled by default since Vista / Server 2008.
+        A GPO setting it to 0 makes Windows store the LM hash (crackable in
+        seconds) for passwords up to 14 characters - in AD when it applies to DCs,
+        in the local SAM on other computers. Evaluated per computer with GPO scope.
+        """
+        self.logger.info("---Checking LM hash storage (NoLMHash)---")
+        
+        if not self.username or not self.password:
+            self.logger.warning("[!] LM hash check requires SMB credentials")
+            return
+        
+        try:
+            from impacket.smbconnection import SMBConnection
+            dcs = self.ldap.query(
+                search_base=self.base_dn,
+                search_filter='(&(objectClass=computer)(userAccountControl:1.2.840.113556.1.4.803:=8192))',
+                attributes=['dNSHostName']
+            )
+            dc_hostname = select_reachable_dc(dcs, fallback=self.server, logger=self.logger) if dcs else self.server
+            conn = SMBConnection(dc_hostname, dc_hostname)
+            conn.login(self.username, self.password, self.domain)
+            settings = self._get_ntlm_settings_from_gpttmpl(conn)
+            conn.logoff()
+            
+            values = {guid.upper(): cfg['no_lm_hash'] for _, guid, cfg in settings if 'no_lm_hash' in cfg}
+            names = {guid.upper(): name for name, guid, _ in settings}
+            enabling = [names[g] for g, v in values.items() if v == 0]
+            if not enabling:
+                self.logger.success("[+] No GPO enables LM hash storage (NoLMHash is not set to 0)")
+                return
+            
+            from ...utils.gpo_scope import GPOScope
+            scope = GPOScope(self.ldap, self.logger)
+            computers = self.ldap.query(
+                search_base=self.base_dn,
+                search_filter='(&(objectClass=computer)(!(userAccountControl:1.2.840.113556.1.4.803:=2)))',
+                attributes=['sAMAccountName', 'distinguishedName', 'objectSid', 'primaryGroupID', 'userAccountControl']
+            )
+            affected, unclear = [], []
+            for computer in computers:
+                result = scope.effective_value(computer, values)
+                name = computer.get('sAMAccountName', computer['distinguishedName'])
+                if result.status == 'configured' and result.value == 0:
+                    dc_note = ' (DC - LM hashes stored in Active Directory)' if int(computer.get('userAccountControl') or 0) & 0x2000 else ''
+                    affected.append(f"{name}{dc_note}")
+                elif result.status in ('conflict', 'uncertain'):
+                    unclear.append(f"{name}: {result.status} - {result.reason}")
+            
+            if affected:
+                self.logger.finding(f"LM hashes are stored on {len(affected)} computers (NoLMHash=0 via GPO: {', '.join(enabling)})")
+                write_file('\n'.join([f"GPOs setting NoLMHash=0: {', '.join(enabling)}", "",
+                                      "Computers where it applies:"] + [f"  {a}" for a in sorted(affected)]),
+                           self.output_paths['findings'] / 'lm_hash_storage.txt', self.logger)
+            else:
+                self.logger.success(f"[+] GPO(s) setting NoLMHash=0 ({', '.join(enabling)}) don't apply to any computer")
+            if unclear:
+                self.logger.warning(f"[!] NoLMHash scope couldn't be determined for {len(unclear)} computers - verify manually")
+                write_file('\n'.join(unclear), self.output_paths['checks'] / 'lm_hash_storage_verify.txt', self.logger)
+        except Exception as e:
+            self.logger.error(f"[-] Error checking LM hash storage: {e}")
     
     def _check_llmnr(self):
         """Check if LLMNR is disabled via GPO.
@@ -944,6 +1010,7 @@ class NTLMChecker:
         # Registry value keys we're interested in (lowercase for matching)
         ntlm_keys = {
             'machine\\system\\currentcontrolset\\control\\lsa\\lmcompatibilitylevel': 'lm_compatibility_level',
+            'machine\\system\\currentcontrolset\\control\\lsa\\nolmhash': 'no_lm_hash',
             'machine\\system\\currentcontrolset\\services\\netlogon\\parameters\\restrictntlmindomain': 'restrict_ntlm_domain',
             'machine\\system\\currentcontrolset\\control\\lsa\\msv1_0\\restrictsendingntlmtraffic': 'restrict_sending',
             'machine\\system\\currentcontrolset\\control\\lsa\\msv1_0\\restrictreceivingntlmtraffic': 'restrict_receiving',

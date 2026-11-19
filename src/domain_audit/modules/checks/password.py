@@ -74,6 +74,15 @@ class PasswordChecker:
                 self.logger.finding("PasswordComplexity is disabled!")
                 findings.append("Password complexity is disabled")
             
+            # DOMAIN_PASSWORD_STORE_CLEARTEXT (0x10, MS-SAMR): passwords set while
+            # this is on are stored with reversible encryption in NTDS.dit and can be
+            # recovered in cleartext (e.g. via DCSync / NTDS backup)
+            if pwd_properties & 0x10:
+                self.logger.finding("Domain password policy stores passwords using reversible encryption")
+                findings.append("Passwords are stored using reversible encryption (pwdProperties 0x10)")
+            else:
+                self.logger.success("[+] Passwords are not stored using reversible encryption")
+
             lockout_threshold = policy.get('lockoutThreshold', 0)
             if lockout_threshold == 0:
                 self.logger.finding("LockOutBadCount is 0, accounts won't be locked!")
