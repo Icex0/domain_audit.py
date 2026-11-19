@@ -22,6 +22,7 @@ from .ldap import LDAPChecker
 from .trusts import TrustChecker
 from .azure import AzureChecker
 from .sccm import SCCMChecker
+from .veeam import VeeamChecker
 from .bloodhound import BloodHoundChecker
 from .sql import SQLChecker
 from .privileged_groups import PrivilegedGroupsChecker
@@ -61,6 +62,7 @@ AVAILABLE_CHECKS = {
     'trusts': ('Domain trusts', 'trust_checker', 'check_trusts'),
     'azure': ('Azure/Entra Connect and AZUREADSSOACC', 'azure_checker', 'run_all_checks'),
     'sccm': ('SCCM/MECM configuration', 'sccm_checker', 'check_sccm'),
+    'veeam': ('Veeam Backup & Replication server joined to the domain', 'veeam_checker', 'check_veeam'),
     'ldap': ('LDAP anonymous bind, signing and channel binding', 'ldap_checker', 'check_ldap'),
     'sysvol': ('SYSVOL/NETLOGON passwords (GPP cpassword/autologon, keywords)', 'file_share_checker', 'check_shares'),
     'spooler': ('Print Spooler on domain controllers', 'dc_vulns_checker', 'check_printspooler'),
@@ -143,6 +145,7 @@ class SecurityChecker:
         self.trust_checker = TrustChecker(ldap_conn, output_paths)
         self.azure_checker = AzureChecker(ldap_conn, output_paths)
         self.sccm_checker = SCCMChecker(ldap_conn, output_paths)
+        self.veeam_checker = VeeamChecker(ldap_conn, output_paths)
         self.bloodhound_checker = BloodHoundChecker(ldap_conn, output_paths,
                                                      domain=domain, username=username,
                                                      password=password, hashes=hashes)
@@ -226,6 +229,7 @@ class SecurityChecker:
         self.trust_checker.check_trusts()
         self.azure_checker.run_all_checks()
         self.sccm_checker.check_sccm()
+        self.veeam_checker.check_veeam()
         self.wsus_checker.check_wsus()
         
         # Phase 8 checks

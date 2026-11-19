@@ -162,6 +162,9 @@ Checks report what was actually verified: confirmed issues go to `findings/`, ca
 **SCCM**
 - SCCM System Management container detection
 
+**Backup**
+- Veeam Backup & Replication server joined to the domain (`VeeamBackupSvc` SPN on a computer or service account, confirmed by testing TCP 9392; Veeam advises against joining it to the production domain)
+
 **Group Policy (evaluated per computer)**
 
 GPO-based checks take links, enforced links, block inheritance, security filtering and disabled computer settings into account; WMI filters, site links and same-level conflicts are reported for manual verification.
