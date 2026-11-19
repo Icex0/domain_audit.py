@@ -109,17 +109,17 @@ class ADIDNSChecker:
                     self.logger.info(f"[*] Could not parse security descriptor: {e}")
                     return None
 
-                allowed = [principals[sid] + f" ({sid})" for sid, ok in decisions.items() if ok]
+                allowed_sids = [sid for sid, ok in decisions.items() if ok]
+                allowed = [principals[sid] + f" ({sid})" for sid in allowed_sids]
                 if allowed:
                     self.logger.finding(f"Low-privileged principals can add DNS records (CreateChild): {', '.join(allowed)}")
-                    write_lines(
-                        [f"Zone: {self.domain}",
-                         f"Partition: {partition}",
-                         f"DN: {zone_dn}",
-                         "Principals with CreateChild (dnsNode) on the zone:"] +
-                        [f"  - {a}" for a in allowed],
-                        self.output_paths['findings'] / 'ADIDNS_authenticated_users.txt'
-                    )
+                    lines = [f"Zone: {self.domain}",
+                             f"Partition: {partition}",
+                             f"DN: {zone_dn}",
+                             "Principals with CreateChild (dnsNode) on the zone:"] + [f"  - {a}" for a in allowed]
+                    if domain_sid and allowed_sids == [f'{domain_sid}-515']:
+                        lines += [""] + self._domain_computers_context()
+                    write_lines(lines, self.output_paths['findings'] / 'ADIDNS_authenticated_users.txt')
                     return True
 
                 self.logger.success("[+] Low-privileged principals cannot add DNS records (no CreateChild permission)")
@@ -131,6 +131,36 @@ class ADIDNSChecker:
         except Exception as e:
             self.logger.error(f"[-] Error checking ADIDNS permissions: {e}")
             return None
+
+    def _domain_computers_context(self) -> list:
+        """Explain how a user gets a Domain Computers account, based on MachineAccountQuota.
+
+        Granting CreateChild to Domain Computers (instead of Authenticated Users)
+        is a common hardening step for secure dynamic DNS registration. Any
+        computer account can still add records, and by default any user can
+        create one (ms-DS-MachineAccountQuota = 10, SeMachineAccountPrivilege for
+        Authenticated Users in the Default Domain Controllers Policy).
+        """
+        quota = None
+        try:
+            result = self.ldap.query(self.base_dn, '(objectClass=domainDNS)', ['ms-DS-MachineAccountQuota'])
+            if result and result[0].get('ms-DS-MachineAccountQuota') not in (None, '', []):
+                quota = int(result[0]['ms-DS-MachineAccountQuota'])
+        except Exception as e:
+            self.logger.debug(f"Could not read ms-DS-MachineAccountQuota: {e}")
+
+        lines = ["Only Domain Computers can add records (typical hardening for dynamic DNS registration).",
+                 "Any computer account can still add records over LDAP or secure dynamic DNS updates."]
+        if quota is None:
+            lines.append("ms-DS-MachineAccountQuota could not be read - if > 0, any user can create a computer account and abuse this.")
+            self.logger.warning("[!] Only Domain Computers can add DNS records - exploitable by any user if MachineAccountQuota > 0 (couldn't read it)")
+        elif quota > 0:
+            lines.append(f"ms-DS-MachineAccountQuota is {quota}: any user can create a computer account (e.g. addcomputer.py / Powermad) and use it to add DNS records.")
+            self.logger.warning(f"[!] Only Domain Computers can add DNS records, but MachineAccountQuota is {quota} - any user can create a computer account to do it")
+        else:
+            lines.append("ms-DS-MachineAccountQuota is 0: requires control of an existing computer account (e.g. a compromised host) or delegated computer creation rights.")
+            self.logger.info("[*] Only Domain Computers can add DNS records and MachineAccountQuota is 0 - requires control of a computer account")
+        return lines
 
     def _check_adidns_wildcard(self, can_create: Optional[bool]):
         """Check for ADIDNS wildcard record.
