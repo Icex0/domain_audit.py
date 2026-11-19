@@ -10,11 +10,15 @@ from typing import Dict
 from ...utils.logger import get_logger
 from ...utils.ldap import LDAPConnection
 from ...utils.output import write_lines
-from ...utils.gpp import find_cpasswords, find_autologon
+import re
+
+from ...utils.gpp import find_cpasswords, find_autologon, find_keyword_hits, find_keyword_lines
 from ...utils.sysvol import SysvolClient, has_credentials
 from ...config import SYSVOL_PASSWORD_KEYWORDS, NETLOGON_PASSWORD_KEYWORDS
 
-NETLOGON_TEXT_EXTENSIONS = ('.bat', '.cmd', '.ps1', '.vbs', '.txt')
+# Script/text files searched line by line (NETLOGON, and GPO logon/startup scripts in SYSVOL)
+SCRIPT_EXTENSIONS = ('.bat', '.cmd', '.ps1', '.psm1', '.vbs', '.js', '.kix', '.txt', '.ini')
+NETLOGON_TEXT_EXTENSIONS = SCRIPT_EXTENSIONS
 
 
 class FileShareChecker:
@@ -37,6 +41,24 @@ class FileShareChecker:
         self._check_sysvol_passwords()
         self._check_netlogon_passwords()
 
+    def _gpo_names(self) -> Dict[str, str]:
+        """GPO GUID (upper case, with braces) -> display name."""
+        try:
+            gpos = self.ldap.query(self.ldap.config.base_dn, '(objectClass=groupPolicyContainer)',
+                                   ['cn', 'displayName'])
+        except Exception as e:
+            self.logger.debug(f"Could not read GPO names: {e}")
+            return {}
+        return {str(g.get('cn', '')).upper(): str(g.get('displayName', '')) for g in gpos if g.get('cn')}
+
+    @staticmethod
+    def _gpo_label(file_path: str, names: Dict[str, str]) -> str:
+        match = re.search(r'\{[0-9A-Fa-f-]{36}\}', file_path)
+        if not match:
+            return file_path
+        name = names.get(match.group(0).upper())
+        return f"{file_path} (GPO: {name})" if name else file_path
+
     def _sysvol(self) -> SysvolClient:
         return SysvolClient.shared(self.ldap, self.domain, self.username, self.password, self.hashes, self.logger)
 
@@ -50,10 +72,24 @@ class FileShareChecker:
 
         try:
             sysvol = self._sysvol()
+            gpo_names = self._gpo_names()
             gpp_findings, autologon_findings, keyword_hits = [], [], []
-            xml_count = 0
+            keyword_files = 0
+            xml_count = script_count = 0
             for file_path in sysvol.walk(sysvol.policies_path):
-                if not file_path.lower().endswith('.xml'):
+                lower_path = file_path.lower()
+                if lower_path.endswith(SCRIPT_EXTENSIONS) and lower_path.rsplit('/', 1)[-1] != 'gpt.ini':
+                    # GPO logon/logoff/startup/shutdown scripts (e.g. User/Scripts/Logon/map.bat)
+                    script_count += 1
+                    content = sysvol.read(file_path)
+                    hits = find_keyword_lines(content, SYSVOL_PASSWORD_KEYWORDS) if content else []
+                    if hits:
+                        keyword_files += 1
+                        keyword_hits.append(self._gpo_label(file_path, gpo_names))
+                        keyword_hits.extend(f"  {hit}" for hit in hits)
+                        keyword_hits.append("")
+                    continue
+                if not lower_path.endswith('.xml'):
                     continue
                 xml_count += 1
                 content = sysvol.read(file_path)
@@ -73,13 +109,14 @@ class FileShareChecker:
                 if found_credentials:
                     continue  # already reported with the actual credentials; skip the keyword hit
 
-                content_lower = content.lower()
-                for keyword in SYSVOL_PASSWORD_KEYWORDS:
-                    if keyword.encode() in content_lower:
-                        keyword_hits.append(f"Found '{keyword}' in {file_path}")
-                        break
+                hits = find_keyword_hits(content, SYSVOL_PASSWORD_KEYWORDS)
+                if hits:
+                    keyword_files += 1
+                    keyword_hits.append(self._gpo_label(file_path, gpo_names))
+                    keyword_hits.extend(f"  {hit}" for hit in hits)
+                    keyword_hits.append("")
 
-            self.logger.info(f"[*] Scanned {xml_count} XML files in SYSVOL of {sysvol.host}")
+            self.logger.info(f"[*] Scanned {xml_count} XML files and {script_count} script files in SYSVOL of {sysvol.host}")
 
             if gpp_findings:
                 self.logger.finding(f"{len(gpp_findings)} Group Policy Preferences passwords (cpassword) found in SYSVOL")
@@ -94,8 +131,12 @@ class FileShareChecker:
                 self.logger.success("[+] No Group Policy Preferences autologon passwords found in SYSVOL")
 
             if keyword_hits:
-                self.logger.warning(f"[!] {len(keyword_hits)} SYSVOL XML files contain password keywords - please check manually")
-                write_lines(keyword_hits, self.output_paths['checks'] / 'sysvol_passwords.txt')
+                self.logger.warning(f"[!] {keyword_files} SYSVOL file(s) contain password keywords or credentials - "
+                                    "review the matched values in sysvol_passwords.txt")
+                write_lines(["Password keywords and credential command lines in SYSVOL (GPP XML values and GPO",
+                             "scripts; GPP schema attributes such as bypassErrors and empty cpassword are",
+                             "ignored). Review each value:", ""] + keyword_hits,
+                            self.output_paths['checks'] / 'sysvol_passwords.txt')
         except Exception as e:
             self.logger.error(f"[-] Error checking SYSVOL: {e}")
 
@@ -117,11 +158,11 @@ class FileShareChecker:
                     content = sysvol.read(full_path, share='NETLOGON')
                     if not content:
                         continue
-                    content_lower = content.lower()
-                    for keyword in NETLOGON_PASSWORD_KEYWORDS:
-                        if keyword.encode() in content_lower:
-                            findings.append(f"Found '{keyword}' in {full_path}")
-                            break
+                    hits = find_keyword_lines(content, NETLOGON_PASSWORD_KEYWORDS)
+                    if hits:
+                        findings.append(f"{full_path}:")
+                        findings.extend(f"  {hit}" for hit in hits)
+                        findings.append("")
 
             if findings:
                 self.logger.warning(f"[!] Possible passwords found in NETLOGON of {sysvol.host}")

@@ -108,3 +108,120 @@ def find_autologon(content: bytes) -> List[Dict[str, str]]:
     domains = values.get('defaultdomainname', []) or ['']
     return [{'user': users[min(i, len(users) - 1)], 'domain': domains[min(i, len(domains) - 1)], 'password': pw}
             for i, pw in enumerate(passwords)]
+
+
+# GPP schema attributes whose *name* contains a keyword but that never hold a
+# secret (bypassErrors="1", subAuthority="RID_ADMIN", logonType="Password", ...).
+# cpassword is handled by find_cpasswords; an empty one is the schema default.
+_BENIGN_ATTRIBUTES = {'bypasserrors', 'cpassword', 'subauthority', 'logontype', 'nochange', 'changelogon'}
+# Substrings that contain a keyword without meaning "password" ('pass' in bypass,
+# 'auth' in Authenticated Users/author, 'ww' in www).
+_BENIGN_SUBSTRINGS = ('bypass', 'authenticated users', 'author', 'www', 'passive', 'compass')
+# Values that only mean on/off
+_FLAG_VALUES = {'', '0', '1', 'true', 'false', 'yes', 'no'}
+
+
+# Command lines that carry a credential without a password keyword next to it.
+_CREDENTIAL_PATTERNS = [
+    ("net use /user", re.compile(r'\bnet(?:\.exe)?\s+use\b[^\r\n]*/u(?:ser)?:', re.I)),
+    ("net user <name> <password>", re.compile(r'\bnet(?:\.exe)?\s+user\s+\S+\s+(?![/*])\S+', re.I)),
+    ("ConvertTo-SecureString -AsPlainText", re.compile(r'-AsPlainText\b', re.I)),
+    ("PSCredential", re.compile(r'\bPSCredential\b', re.I)),
+    ("schtasks /rp", re.compile(r'\bschtasks(?:\.exe)?\b[^\r\n]*\s/rp\s', re.I)),
+    ("psexec -p", re.compile(r'\bpsexec(?:64)?(?:\.exe)?\b[^\r\n]*\s-p\s', re.I)),
+    # VBScript MapNetworkDrive(drive, path, persistent, user, password)
+    ("MapNetworkDrive with password", re.compile(r'\bMapNetworkDrive\b(?:[^,\r\n]*,){4}\s*\S', re.I)),
+    ("sqlcmd/osql -P", re.compile(r'\b(?:sqlcmd|osql)(?:\.exe)?\b[^\r\n]*\s-P\s', re.I)),
+]
+
+
+def _credential_pattern(value: str) -> Optional[str]:
+    return next((label for label, pattern in _CREDENTIAL_PATTERNS if pattern.search(value)), None)
+
+
+def _match(value: str, keywords) -> Optional[str]:
+    """Matched keyword ('pass') or credential pattern ('pattern: net use /user')."""
+    keyword = _keyword_in(value, keywords)
+    if keyword:
+        return keyword
+    label = _credential_pattern(value)
+    return f"pattern: {label}" if label else None
+
+
+def _keyword_in(value: str, keywords) -> Optional[str]:
+    lower = value.lower()
+    for benign in _BENIGN_SUBSTRINGS:
+        lower = lower.replace(benign, ' ')
+    return next((kw for kw in keywords if kw in lower), None)
+
+
+def _short(value: str, limit: int = 160) -> str:
+    value = ' '.join(value.split())
+    return value if len(value) <= limit else value[:limit] + '...'
+
+
+def find_keyword_hits(content: bytes, keywords) -> List[str]:
+    """Return readable keyword hits in a GPP XML file, with the matching value.
+
+    Matches attribute values and element text, plus attribute *names* that
+    contain a keyword when they hold a real value (not a GPP schema flag or an
+    empty cpassword). Each hit names the GPP item (e.g. Drive "H:") so it can be
+    judged without opening the file.
+    """
+    text = _decode(content)
+    try:
+        root = ET.fromstring(text)
+    except ET.ParseError:
+        return find_keyword_lines(content, keywords)
+
+    parents = {child: parent for parent in root.iter() for child in parent}
+    hits, seen = [], set()
+
+    def item_label(el) -> str:
+        """The GPP item (Drive "H:", TaskV2 "Backup", ...) an element belongs to."""
+        item = el
+        while item is not None and (item.tag.split('}')[-1] == 'Properties' or 'name' not in item.attrib):
+            item = parents.get(item)
+        if item is None:
+            return el.tag.split('}')[-1]
+        return f'{item.tag.split("}")[-1]} "{item.attrib["name"]}"'
+
+    for el in root.iter():
+        # A GPP item's name/status only repeat its Properties (reported there)
+        has_properties = any(child.tag.split('}')[-1] == 'Properties' for child in el)
+        for attr, value in el.attrib.items():
+            attr_lower = attr.lower()
+            if attr_lower in _BENIGN_ATTRIBUTES or (has_properties and attr_lower in ('name', 'status')):
+                continue
+            keyword = _match(value, keywords)
+            if not keyword and value.strip().lower() not in _FLAG_VALUES:
+                keyword = _keyword_in(attr, keywords)
+            if keyword:
+                hit = f"{item_label(el)}: {attr}=\"{_short(value)}\""
+                if attr_lower == 'name' and 'value' in el.attrib:  # registry item: show the data too
+                    hit += f" value=\"{_short(el.attrib['value'])}\""
+                hit += f" (matched {keyword!r})"
+                if hit not in seen:
+                    seen.add(hit)
+                    hits.append(hit)
+        if el.text and el.text.strip():
+            keyword = _match(el.text, keywords)
+            if keyword:
+                hit = f"{item_label(el)}: text \"{_short(el.text)}\" (matched {keyword!r})"
+                if hit not in seen:
+                    seen.add(hit)
+                    hits.append(hit)
+    return hits
+
+
+def find_keyword_lines(content: bytes, keywords, max_lines: int = 20) -> List[str]:
+    """Return 'line N: <line>' for lines of a text file that contain a keyword."""
+    hits = []
+    for number, line in enumerate(_decode(content).splitlines(), 1):
+        keyword = _match(line, keywords)
+        if keyword:
+            hits.append(f"line {number}: {_short(line.strip())} (matched {keyword!r})")
+            if len(hits) >= max_lines:
+                hits.append("... (more matches, truncated)")
+                break
+    return hits

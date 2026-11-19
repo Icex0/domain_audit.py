@@ -197,8 +197,8 @@ GPO-based checks take links, enforced links, block inheritance, security filteri
 - LDAPS channel binding configuration
 
 **File Shares**
-- SYSVOL: Group Policy Preferences passwords (`cpassword`, decrypted) and autologon passwords (`Registry.xml`), plus keyword hits for review
-- NETLOGON script analysis for credentials
+- SYSVOL: Group Policy Preferences passwords (`cpassword`, decrypted) and autologon passwords (`Registry.xml`)
+- SYSVOL GPP values and GPO logon/startup scripts, and NETLOGON scripts: password keywords and credential command lines (`net use /user:`, `net user <name> <password>`, `-AsPlainText`, `PSCredential`, `schtasks /rp`, `psexec -p`, `sqlcmd -P`, `MapNetworkDrive` with a password), reported with the matching value or line for review
 
 **SQL Server**
 - MSSQL server discovery
