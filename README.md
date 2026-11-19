@@ -82,21 +82,23 @@ domain-audit --check adcs -d contoso.com -dc 10.0.0.1 -u domainuser -p 'Password
 
 ### Security Checks
 
+Checks report what was actually verified: confirmed issues go to `findings/`, cases that can't be determined reliably (for example local policy that a low-privileged user can't read) go to `checks/` for manual review.
+
 **Domain & Password Policy**
 - Domain functional level assessment
-- Default password policy (length, complexity, lockout)
-- Fine-Grained Password Policies (FGPP) enumeration
-- Kerberos policy settings (ticket lifetime, encryption types)
+- Default password policy (length, complexity, lockout, reversible encryption)
+- Kerberos policy (only longer-than-default or never-expiring ticket lifetimes are reported)
+- Fine-Grained Password Policies via the effective PSO (`msDS-ResultantPSO`, includes group-applied PSOs); spray list of users without a PSO
+- Share of enabled users that are (nested) Domain/Enterprise Admins
 
 **LAPS**
 - Schema detection (Legacy LAPS vs Windows LAPS)
-- Deployment coverage across computer objects
-- Computers without LAPS enabled
-- LAPS password readability check (current user permissions)
-- LAPS policy configuration (AdminAccountName, PasswordComplexity, PasswordLength, PasswordAgeDays, PwdExpirationProtectionEnabled, AdmPwdEnabled)
+- Deployment coverage (excluding DCs, RODCs and disabled computers)
+- LAPS password readability for the current user (`ms-Mcs-AdmPwd`, `msLAPS-Password`, readable `msLAPS-EncryptedPassword`)
+- LAPS policy configuration for Windows LAPS and legacy LAPS, using each one's value names and defaults
 
 **Kerberos Attacks**
-- Kerberoastable accounts (SPNs on user accounts)
+- Kerberoastable accounts, including privileged accounts by nested Administrators/Domain Admins/Enterprise Admins membership (SQL Server service accounts flagged)
 - AS-REP roastable accounts (DONT_REQ_PREAUTH)
 - Extracts hashes for offline cracking via Impacket
 
@@ -104,38 +106,39 @@ domain-audit --check adcs -d contoso.com -dc 10.0.0.1 -u domainuser -p 'Password
 - Unconstrained delegation on users and computers
 - Constrained delegation (S4U2Self/S4U2Proxy)
 - Resource-Based Constrained Delegation (RBCD)
+- BadSuccessor: non-admins that can create dMSAs in OUs (Windows Server 2025)
 
 **User Attributes**
 - PASSWD_NOTREQD flag (accounts that can have empty passwords)
 - DONT_EXPIRE_PASSWORD flag
 - Reversible encryption enabled
 - DES-only Kerberos encryption
-- Sensitive data in user/group/computer descriptions
+- Password keywords in user/group/computer descriptions (for manual review)
 - userPassword attribute exposed (cleartext or hashed passwords)
 
-**Privileged Accounts**
-- Protected Users group membership
-- NOT_DELEGATED flag on admin accounts
-- Password age for privileged users (>180 days)
-- KRBTGT password age
-- Membership of highly privileged groups (Account Operators, Backup Operators, Print Operators, DNS Admins, Schema Admins)
+**Privileged Accounts & Groups**
+- Protected Users membership (nested) and NOT_DELEGATED flag on enabled admin accounts
+- Password age for privileged users (>180 days) and KRBTGT
+- Non-admin members (nested users, groups, computers) of Account Operators, Server Operators, Backup Operators, Print Operators, Remote Management Users, Hyper-V Administrators, DnsAdmins, Schema Admins, Key Admins, Enterprise Key Admins and Group Policy Creator Owners
+- Non-admins with the RDP logon right on domain controllers (`dc-rdp`)
+- `ESX Admins` group (CVE-2024-37085, informational)
 
 **Stale Objects**
-- Inactive computers and users (no logon in 6+ months)
-- End-of-life operating systems (Server 2008/2012, Windows 7/10 EOL builds)
-- Pre-Windows 2000 Compatible Access group membership
-- ANONYMOUS LOGON (S-1-5-7) group membership detection (warns when combined with Authenticated Users)
-- Pre-Windows 2000 computer password spraying list generation
-- Domain join permissions (ms-DS-MachineAccountQuota)
+- Inactive computers and users (no logon in 365+ days, based on the replicated `lastLogonTimestamp`)
+- End-of-life operating systems, including Windows 10/11 end of servicing per edition and LTSC
+- Pre-Windows 2000 Compatible Access and ANONYMOUS LOGON group membership
+- Pre-created (pre-Windows 2000) computer accounts, with a safe test of the default password (one Kerberos attempt per account, lockout-aware)
+- Users can add computer accounts (MachineAccountQuota combined with who holds "Add workstations to domain" on the DCs)
 
 **Trusts**
-- Domain trust enumeration
-- Trust direction and type analysis
-- SID filtering status (SID history injection risk)
+- Domain trust enumeration (direction, type, attributes)
+- SID filtering on outbound/bidirectional external trusts, SID history enabled on forest trusts, TGT delegation across trusts
 
 **ADIDNS**
-- Zone permissions for authenticated users
-- Wildcard record detection
+- Who can create DNS records (correct ACL parsing incl. object ACEs; Authenticated Users, Domain Users, Domain Computers and more)
+- Domain Computers-only zones judged by whether users can create computer accounts
+- Wildcard record detection (finding only when users can create records)
+- Zones allowing nonsecure dynamic updates
 
 **Certificates (ADCS)**
 - PKI Enrollment Server enumeration
@@ -143,9 +146,9 @@ domain-audit --check adcs -d contoso.com -dc 10.0.0.1 -u domainuser -p 'Password
 - **Vulnerable certificate template detection via certipy** (ESC1, ESC2, ESC3, ESC4, ESC5, ESC6, ESC7, ESC8, ESC9, ESC10, ESC11, ESC13, ESC14, ESC15)
 
 **Exchange**
-- Default Exchange group detection
-- Exchange Windows Permissions WriteDACL escalation path (PrivExchange)
-- Organization Management privilege escalation risk
+- Default Exchange group detection (nested membership)
+- WriteDACL/WriteOwner of Exchange groups on the domain object, read from the ACL (PrivExchange; detects whether the 2019 fix is applied)
+- Organization Management membership
 
 **Azure**
 - Azure AD Connect detection
@@ -159,31 +162,30 @@ domain-audit --check adcs -d contoso.com -dc 10.0.0.1 -u domainuser -p 'Password
 **SCCM**
 - SCCM System Management container detection
 
-**WSUS**
-- WSUS server configuration via GPO (SYSVOL)
-- HTTP vs HTTPS detection (HTTP is vulnerable to MITM attacks via WSUSpect/wsuks)
+**Group Policy (evaluated per computer)**
+
+GPO-based checks take links, enforced links, block inheritance, security filtering and disabled computer settings into account; WMI filters, site links and same-level conflicts are reported for manual verification.
+- WSUS over HTTP (with `UseWUServer`), per affected computer
+- LLMNR not disabled, per computer
+- LM hash storage enabled (`NoLMHash=0`)
 
 **DC Vulnerabilities**
 - Zerologon (CVE-2020-1472) - Domain takeover vulnerability
 - NoPac (CVE-2021-42278/CVE-2021-42287) - Privilege escalation to Domain Admin
 
 **NTLM Security**
-- NTLMv1 support detection (LmCompatibilityLevel 0/1/2 vulnerable to downgrade/relay attacks)
-- NTLM restriction policies (RestrictNTLMInDomain, RestrictSendingNTLMTraffic, RestrictReceivingNTLMTraffic)
-- LLMNR enabled detection (vulnerable to Responder credential capture)
+- NTLMv1 support (LmCompatibilityLevel; only level 5 makes DCs refuse NTLMv1)
+- NTLM restriction and audit policies (RestrictNTLMInDomain, AuditNTLMInDomain, RestrictSendingNTLMTraffic, RestrictReceivingNTLMTraffic, AuditReceivingNTLMTraffic)
 
 **Network Services**
 - IP resolution and /24 range calculation
 - Port scanning (SMB, WinRM, RDP, MSSQL, HTTP)
-- SMB signing enforcement
-- SMBv1 detection
-- SMB null session authentication check
-- SMB guest access check
-- Domain admin sessions on non-DCs
-- SMB/RDP/WinRM/MSSQL access checks (local admin access via netexec)
+- SMB signing enforcement and SMBv1 detection
+- SMB null session (only when shares, users or the password policy can be enumerated) and guest access
+- Domain admin sessions on non-DCs (nested Domain Admins)
+- SMB/WinRM/MSSQL access checks via NetExec; RDP logon access only reported when the installed NetExec confirms the logon
 - RDP NLA disabled detection
-- WebClient service detection
-- NTLM reflection vulnerability detection
+- WebClient service and CVE detection (NetExec `enum_cve`, incl. NTLM reflection)
 - PrintSpooler on Domain Controllers
 
 **LDAP Security**
@@ -192,18 +194,17 @@ domain-audit --check adcs -d contoso.com -dc 10.0.0.1 -u domainuser -p 'Password
 - LDAPS channel binding configuration
 
 **File Shares**
-- SYSVOL password searches (GPP, scripts)
+- SYSVOL: Group Policy Preferences passwords (`cpassword`, decrypted) and autologon passwords (`Registry.xml`), plus keyword hits for review
 - NETLOGON script analysis for credentials
 
 **SQL Server**
 - MSSQL server discovery
 - MSSQL sysadmin role detection
 - Encryption configuration
-- Linked server enumeration
-- Impersonation checks
+- Linked servers (incl. login mappings) and impersonation
 
 ### External Tool Integration
-- **Impacket** - Kerberoasting, AS-REP roasting, authentication
+- **Impacket** - Kerberoasting, AS-REP roasting, SMB/SYSVOL access, LSA user rights, security descriptor parsing
 - **NetExec** - SMB enumeration, LDAP checks, SQL enumeration
 - **Certipy** - ADCS certificate template vulnerability detection
 
@@ -212,10 +213,11 @@ domain-audit --check adcs -d contoso.com -dc 10.0.0.1 -u domainuser -p 'Password
 The tool automatically verifies at startup:
 
 1. **DNS Configuration** - Checks if DNS is set to the DC IP, attempts to auto-configure if running as root/admin
-2. **netexec Availability** - Verifies `nxc`/`netexec` is installed
-3. **certipy Availability** - Verifies `certipy` is installed
+2. **netexec Availability** - Verifies `nxc`/`netexec` is installed and that required modules exist
+3. **NetExec version** - Warns when the installed NetExec predates NetExec main from Oct 2026 (false LDAP signing results when NTLM is disabled, unconfirmed RDP access, missing `enum_cve` checks)
+4. **certipy Availability** - Verifies `certipy` is installed
 
-If any check fails, the tool provides installation instructions and exits.
+If a required tool is missing, the tool provides installation instructions and exits.
 
 ## Output
 
@@ -231,5 +233,6 @@ contoso.com-20260201/
 ## TODO
 
 - [ ] Support Kerberos authentication
+- [ ] Support `--hashes` in all checks (Kerberos policy, LAPS, WSUS, NTLM, SYSVOL/NETLOGON, LDAP signing, DC vulnerabilities and spooler use a password only)
 - [ ] Better netexec error handling
 - [ ] Support more MSSQL checks from PowerUpSQL
