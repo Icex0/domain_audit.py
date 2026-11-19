@@ -1,6 +1,4 @@
-# Domain Audit
-
-![DomainAudit Logo](images/domainaudit_logo.svg)
+![domain_audit](images/domainaudit_logo.svg)
 
 Active Directory security auditing tool. Python port of [`domain_audit.ps1`](https://github.com/0xJs/domain_audit) with additional checks and improvements.
 
