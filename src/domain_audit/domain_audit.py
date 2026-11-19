@@ -21,6 +21,7 @@ from .utils.dependencies import (
     reset_dns,
     is_admin,
     check_netexec_available,
+    check_netexec_recent,
     check_netexec_bloodhound_ce_available,
     check_netexec_modules_available,
     check_certipy_available,
@@ -276,6 +277,7 @@ def _run_audit(
         raise typer.Exit(1)
 
     _check_netexec_module_requirements(list(NETEXEC_MODULE_REQUIREMENTS))
+    check_netexec_recent()
 
     if not skip_bloodhound and not check_netexec_bloodhound_ce_available():
         logger.warning("[!] Skipping BloodHound collection; continuing with other checks")

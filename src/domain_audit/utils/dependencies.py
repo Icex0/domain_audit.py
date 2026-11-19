@@ -112,6 +112,45 @@ def check_netexec_modules_available(protocol: str, modules: List[str], required:
     return False
 
 
+def check_netexec_recent() -> Optional[bool]:
+    """Warn when the installed NetExec lacks fixes on NetExec main that affect results.
+
+    NetExec main builds report the same base version as the last release
+    (1.5.1), so the version string can't tell them apart. Instead the installed
+    source is checked for rdp.login_and_confirm (PR #1348, merged 2026-10-11),
+    which is newer than these fixes:
+    - #1342 (2026-07-31): SMB timeouts against Windows Server 2025 NTLM rate limiting
+    - #1413 (2026-09-11): LDAP signing / channel binding reported as "unknown"
+      instead of a false "None/Never" when NTLM is disabled
+    - #1348 (2026-10-11): RDP pwn3d only when a real session opens
+    Newer enum_cve CVEs (e.g. LDAP signing bypass, #1508) also need a recent main.
+    Returns True/False, or None if it couldn't be determined.
+    """
+    logger = get_logger()
+    netexec_cmd = shutil.which('netexec') or shutil.which('nxc')
+    python_path = _python_from_console_script(netexec_cmd) if netexec_cmd else None
+    if not python_path:
+        logger.debug("Could not locate NetExec's Python interpreter to check its version")
+        return None
+    try:
+        result = subprocess.run([python_path, '-c', 'import nxc, os; print(os.path.dirname(nxc.__file__))'],
+                                capture_output=True, text=True, timeout=30)
+        rdp_py = Path(result.stdout.strip().splitlines()[-1]) / 'protocols' / 'rdp.py'
+        recent = 'def login_and_confirm' in rdp_py.read_text(errors='ignore')
+    except (OSError, subprocess.SubprocessError, IndexError) as e:
+        logger.debug(f"Could not inspect the NetExec installation: {e}")
+        return None
+    if not recent:
+        logger.warning("[!] The installed NetExec is older than NetExec main from Oct 2026. Known effects:")
+        logger.warning("    - LDAP signing/channel binding can be falsely reported as not enforced when NTLM is disabled")
+        logger.warning("    - RDP access results can't be confirmed (reported as 'verify')")
+        logger.warning("    - Missing newer enum_cve checks and Windows Server 2025 SMB timeout handling")
+        logger.info("[*] Upgrade: pipx install --force git+https://github.com/Pennyw0rth/NetExec")
+    else:
+        logger.log_verbose("[+] NetExec includes the fixes from NetExec main (Oct 2026 or newer)")
+    return recent
+
+
 def _get_netexec_version(netexec_cmd: str) -> str:
     try:
         result = subprocess.run(

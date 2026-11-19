@@ -416,6 +416,7 @@ class NetworkChecker:
         try:
             from impacket.smbconnection import SMBConnection
             from impacket.smb import SMB_DIALECT
+            from impacket.smb3structs import SMB2_DIALECT_30, SMB2_NEGOTIATE_SIGNING_REQUIRED
             
             smbv1_hosts = []
             no_signing_hosts = []
@@ -440,11 +441,17 @@ class NetworkChecker:
                     # For SMBv1: use isSigningRequired()
                     # For SMBv3: check _SMBConnection._Connection["RequireSigning"]
                     try:
-                        if is_smbv1:
-                            signing_required = smb.isSigningRequired()
+                        connection = smb._SMBConnection._Connection if not is_smbv1 else None
+                        if connection is not None and connection.get("Dialect", 0) >= SMB2_DIALECT_30:
+                            # impacket force-sets RequireSigning=True for every SMB 3.1.1
+                            # negotiation (3.1.1 session setup is always signed), which
+                            # hid hosts that enable but don't require signing. Read the
+                            # server's negotiated SecurityMode instead (same fix as
+                            # NetExec PR #1299).
+                            signing_required = bool(connection.get("ServerSecurityMode", 0) & SMB2_NEGOTIATE_SIGNING_REQUIRED)
                         else:
-                            # For SMB2/3, check the connection settings
-                            signing_required = smb._SMBConnection._Connection.get("RequireSigning", False)
+                            # SMBv1 and SMB 2.0.2/2.1: impacket's flag is accurate
+                            signing_required = smb.isSigningRequired()
                         
                         if not signing_required:
                             no_signing_hosts.append(host.ip)
