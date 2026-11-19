@@ -74,6 +74,12 @@ class ADIDNSChecker:
                 return int.from_bytes(raw[20:20 + data_len], 'little')
         return None
 
+    @staticmethod
+    def is_reverse_zone(name: str) -> bool:
+        """True for reverse lookup zones (in-addr.arpa / ip6.arpa)."""
+        name = name.lower().rstrip('.')
+        return name.endswith('.in-addr.arpa') or name.endswith('.ip6.arpa') or name in ('in-addr.arpa', 'ip6.arpa')
+
     def _check_dynamic_updates(self):
         """Find AD-integrated DNS zones that allow nonsecure dynamic updates.
 
@@ -92,7 +98,7 @@ class ADIDNSChecker:
                 'forest': f"DC=ForestDnsZones,{forest_dn}",
                 'legacy (System)': f"CN=MicrosoftDNS,CN=System,{self.base_dn}",
             }
-            nonsecure, checked = [], 0
+            forward, reverse, checked = [], [], 0
             for label, base in bases.items():
                 try:
                     zones = self.ldap.query_raw(base, '(objectClass=dnsZone)', ['name', 'dNSProperty'])
@@ -105,18 +111,39 @@ class ADIDNSChecker:
                         continue
                     checked += 1
                     if value == self.ZONE_UPDATE_UNSECURE:
-                        nonsecure.append(f"{zone['attributes'].get('name')} ({label} zone)")
-            
-            if nonsecure:
-                self.logger.finding(f"{len(nonsecure)} DNS zone(s) allow nonsecure dynamic updates: {', '.join(nonsecure)}")
-                write_lines(["DNS zones allowing nonsecure dynamic updates (anyone can register/overwrite records):"] +
-                            [f"  - {z}" for z in nonsecure] +
-                            ["", "Recommendation: set dynamic updates to 'Secure only' for AD-integrated zones."],
+                        name = str(zone['attributes'].get('name') or '')
+                        entry = f"{name} ({label} zone)"
+                        (reverse if self.is_reverse_zone(name) else forward).append(entry)
+
+            if forward:
+                self.logger.finding(f"{len(forward)} DNS zone(s) allow nonsecure dynamic updates: {', '.join(forward)}")
+                write_lines(["DNS forward lookup zones allowing nonsecure dynamic updates:"] +
+                            [f"  - {z}" for z in forward] +
+                            ["",
+                             "Anyone who can reach the DNS server, without an account, can register new names or",
+                             "overwrite existing A/AAAA/CNAME records with an unauthenticated DNS UPDATE, for example",
+                             "to redirect a file server, proxy (WPAD) or other service to an attacker-controlled host.",
+                             "",
+                             "Recommendation: set dynamic updates to 'Secure only' for AD-integrated zones."],
                             self.output_paths['findings'] / 'DNS_nonsecure_dynamic_updates.txt')
-            elif checked:
-                self.logger.success(f"[+] None of the {checked} DNS zones allow nonsecure dynamic updates")
-            else:
-                self.logger.info("[*] No DNS zone update settings could be read")
+            if reverse:
+                self.logger.warning(f"[!] {len(reverse)} reverse DNS zone(s) allow nonsecure dynamic updates "
+                                    f"(lower impact, PTR records only): {', '.join(reverse)}")
+                write_lines(["DNS reverse lookup zones allowing nonsecure dynamic updates:"] +
+                            [f"  - {z}" for z in reverse] +
+                            ["",
+                             "Reverse zones only hold PTR records (IP -> name), so this does not let anyone redirect",
+                             "clients to another host. Spoofed PTR records can mislead logging, monitoring and",
+                             "investigations, and affect software that trusts reverse DNS for access decisions or",
+                             "hostname canonicalization. Report as low impact unless such a dependency exists.",
+                             "",
+                             "Recommendation: set dynamic updates to 'Secure only' for AD-integrated zones."],
+                            self.output_paths['checks'] / 'DNS_nonsecure_dynamic_updates_reverse_zones.txt')
+            if not forward and not reverse:
+                if checked:
+                    self.logger.success(f"[+] None of the {checked} DNS zones allow nonsecure dynamic updates")
+                else:
+                    self.logger.info("[*] No DNS zone update settings could be read")
         except Exception as e:
             self.logger.error(f"[-] Error checking DNS dynamic update settings: {e}")
 

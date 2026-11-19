@@ -138,7 +138,7 @@ Checks report what was actually verified: confirmed issues go to `findings/`, ca
 - Who can create DNS records (correct ACL parsing incl. object ACEs; Authenticated Users, Domain Users, Domain Computers and more)
 - Domain Computers-only zones judged by whether users can create computer accounts
 - Wildcard record detection (finding only when users can create records)
-- Zones allowing nonsecure dynamic updates
+- Zones allowing nonsecure dynamic updates (forward zones as finding, reverse zones as lower-impact check)
 
 **Certificates (ADCS)**
 - PKI Enrollment Server enumeration
