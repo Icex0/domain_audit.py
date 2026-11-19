@@ -174,42 +174,62 @@ class TrustChecker:
             self.logger.info(f"    SID: {trust_info['sid']}")
     
     def _check_trust_security(self, trusts: List[Dict]):
-        """Check for trust security issues."""
+        """Check for trust security issues.
+
+        trustedDomain objects describe the trust from this domain's side
+        (MS-ADTS trustDirection / trustAttributes):
+        - Direction 2 (outbound) or 3 (bidirectional): this domain trusts the
+          other one, so principals from there can authenticate here. SID
+          filtering only protects this domain on these trusts.
+        - Direction 1 (inbound): the other domain trusts this one; its
+          principals can't authenticate here.
+        - QUARANTINED_DOMAIN (0x4) is SID filtering for external trusts.
+        - Forest trusts (FOREST_TRANSITIVE 0x8) filter SIDs by default;
+          TREAT_AS_EXTERNAL (0x40) is only evaluated on forest trusts and relaxes
+          filtering to external-trust level (netdom /enablesidhistory:yes).
+        - Within-forest trusts (WITHIN_FOREST 0x20) never filter SIDs by design.
+        - CROSS_ORGANIZATION_ENABLE_TGT_DELEGATION (0x800): TGTs may be delegated
+          over the trust (unconstrained delegation across the trust).
+        """
         findings = []
         
         for trust in trusts:
             issues = []
-            
-            # Check for inbound trusts (potential attack path)
-            # Within-forest trusts (e.g. parent-child) are bidirectional by design
-            # and are not a finding - only flag external/cross-forest inbound trusts
             attrs_raw = trust.get('attributes_raw', 0)
+            direction = trust['direction_raw']
             is_within_forest = bool(attrs_raw & 0x00000020)
-            if trust['direction_raw'] in [1, 3] and not is_within_forest:  # Inbound or Bidirectional
-                issues.append(f"Inbound trust - potential attack path from {trust['domain']}")
+            is_forest_trust = bool(attrs_raw & 0x00000008)
+            is_quarantined = bool(attrs_raw & 0x00000004)
+            treat_as_external = bool(attrs_raw & 0x00000040)
+            trusts_other_side = direction in (2, 3)  # outbound or bidirectional
             
-            # Check for SID filtering (quarantined)
-            if not (attrs_raw & 0x00000004):  # Not quarantined
-                if trust['direction_raw'] in [1, 3]:  # Inbound trusts
-                    if is_within_forest:
-                        # Within-forest trusts have SID filtering disabled by design
-                        # (Microsoft enforces this) - not a finding
-                        pass
-                    else:
-                        issues.append("SID filtering NOT enabled - vulnerable to SID history injection")
+            if direction == 0:
+                self.logger.info(f"    {trust['domain']}: trust is disabled")
+            elif direction == 1:
+                self.logger.info(f"    {trust['domain']}: inbound only - users of this domain can access {trust['domain']}, not the other way round")
+            elif is_within_forest:
+                self.logger.info(f"    {trust['domain']}: within-forest trust - no SID filtering by design (the forest is the security boundary)")
+            else:
+                self.logger.info(f"    {trust['domain']}: principals of {trust['domain']} can authenticate to this domain")
             
-            # Check for external trusts without quarantine
-            if attrs_raw & 0x00000040:  # Treat as external
-                if not (attrs_raw & 0x00000004):
-                    issues.append("External trust without SID filtering")
+            if trusts_other_side and not is_within_forest:
+                if is_forest_trust:
+                    if treat_as_external:
+                        issues.append(
+                            "SID history enabled on forest trust (TREAT_AS_EXTERNAL) - SID filtering relaxed, "
+                            "SIDs with RID >= 1000 from the trusted forest are accepted"
+                        )
+                elif trust['type_raw'] in (1, 2) and not is_quarantined:
+                    # External trust to a Windows domain without quarantine
+                    issues.append("SID filtering (quarantine) disabled on external trust - vulnerable to SID history injection")
             
-            # Check for cross-forest trusts
-            if attrs_raw & 0x00000008:  # Forest transitive
-                issues.append("Forest trust - check for inter-forest SID filtering")
+            if attrs_raw & 0x00000800:
+                issues.append("TGT delegation enabled across the trust (CROSS_ORGANIZATION_ENABLE_TGT_DELEGATION)")
             
             if issues:
                 findings.append({
                     'domain': trust['domain'],
+                    'direction': trust['direction'],
                     'issues': '; '.join(issues)
                 })
                 for issue in issues:
@@ -217,3 +237,5 @@ class TrustChecker:
         
         if findings:
             write_csv(findings, self.output_paths['findings'] / 'trust_vulnerabilities.txt')
+        else:
+            self.logger.success("[+] No SID filtering or TGT delegation issues found on the trusts")

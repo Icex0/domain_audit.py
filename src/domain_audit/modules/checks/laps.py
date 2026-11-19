@@ -88,11 +88,19 @@ class LAPSChecker:
                 if laps_types['legacy']:
                     attrs.extend(['ms-Mcs-AdmPwd', 'ms-Mcs-AdmPwdExpirationTime'])
                 if laps_types['windows']:
-                    attrs.extend(['msLAPS-PasswordExpirationTime'])
+                    attrs.extend(['msLAPS-PasswordExpirationTime', 'msLAPS-Password', 'msLAPS-EncryptedPassword'])
                 
+                # Enabled Windows computers, excluding DCs (SERVER_TRUST_ACCOUNT 0x2000)
+                # and RODCs (PARTIAL_SECRETS_ACCOUNT 0x4000000): they have no local
+                # administrator account for LAPS to manage.
                 all_computers = self.ldap.query(
                     search_base=self.base_dn,
-                    search_filter='(&(objectClass=computer)(operatingSystem=*Windows*))',
+                    search_filter=(
+                        '(&(objectClass=computer)(operatingSystem=*Windows*)'
+                        '(!(userAccountControl:1.2.840.113556.1.4.803:=2))'
+                        '(!(userAccountControl:1.2.840.113556.1.4.803:=8192))'
+                        '(!(userAccountControl:1.2.840.113556.1.4.803:=67108864)))'
+                    ),
                     attributes=attrs
                 )
                 
@@ -113,14 +121,32 @@ class LAPSChecker:
                     
                     # Check if the current user can read LAPS passwords (DA/delegated only)
                     self.logger.info("---Checking if current user has permissions to read LAPS passwords---")
-                    readable_passwords = [c for c in laps_computers if c.get('ms-Mcs-AdmPwd')]
-                    if readable_passwords:
-                        self.logger.finding("The current user could read LAPS passwords")
-                        pwd_file = self.output_paths['findings'] / 'laps_passwords_readable.txt'
-                        pwd_data = [f"{c.get('sAMAccountName', 'unknown')}: {c.get('ms-Mcs-AdmPwd', '')}" for c in readable_passwords]
-                        write_lines(pwd_data, pwd_file)
+                    # Legacy LAPS: ms-Mcs-AdmPwd (cleartext). Windows LAPS: msLAPS-Password
+                    # (cleartext JSON, when AD encryption is off) or msLAPS-EncryptedPassword
+                    # (only decryptable by the configured decryptor principal).
+                    pwd_data = []
+                    encrypted_readable = []
+                    for c in laps_computers:
+                        name = c.get('sAMAccountName', 'unknown')
+                        if c.get('ms-Mcs-AdmPwd'):
+                            pwd_data.append(f"{name}: {c.get('ms-Mcs-AdmPwd')} (legacy LAPS)")
+                        if c.get('msLAPS-Password'):
+                            pwd_data.append(f"{name}: {c.get('msLAPS-Password')} (Windows LAPS, not encrypted)")
+                        if c.get('msLAPS-EncryptedPassword'):
+                            encrypted_readable.append(name)
+                    
+                    if pwd_data:
+                        self.logger.finding(f"The current user could read {len(pwd_data)} LAPS passwords")
+                        write_lines(pwd_data, self.output_paths['findings'] / 'laps_passwords_readable.txt')
                     else:
-                        self.logger.success("[+] The current user couldn't read any LAPS passwords")
+                        self.logger.success("[+] The current user couldn't read any cleartext LAPS passwords")
+                    
+                    if encrypted_readable:
+                        self.logger.warning(
+                            f"[!] The current user can read the encrypted Windows LAPS password of {len(encrypted_readable)} "
+                            "systems - it can only be decrypted by the configured decryptor (verify with netexec --laps / LAPS tooling)"
+                        )
+                        write_lines(encrypted_readable, self.output_paths['checks'] / 'laps_encrypted_passwords_readable.txt')
                     
                     self.logger.info("---Checking for computers without LAPS---")
                     if no_laps:
@@ -200,6 +226,12 @@ class LAPSChecker:
         except Exception as e:
             self.logger.error(f"[-] Error connecting to SYSVOL: {e}")
 
+    # Registry.pol keys. Windows LAPS GPO settings live under
+    # Software\Microsoft\Windows\CurrentVersion\Policies\LAPS; legacy Microsoft
+    # LAPS under Software\Policies\Microsoft Services\AdmPwd.
+    WINDOWS_LAPS_KEY = 'software\\microsoft\\windows\\currentversion\\policies\\laps'
+    LEGACY_LAPS_KEY = 'software\\policies\\microsoft services\\admpwd'
+
     def _analyze_laps_policy(self, gpo_name: str, content: bytes):
         """Analyze LAPS policy settings from parsed Registry.pol content."""
         entries = parse_pol_file(content)
@@ -208,88 +240,37 @@ class LAPSChecker:
             self.logger.warning(f"[!] Could not parse Registry.pol for {gpo_name}")
             return
         
-        laps_settings = {}
+        settings = {'windows': {}, 'legacy': {}}
         for key, value_name, reg_type, data_size, data in entries:
-            if 'LAPS' in key or 'AdmPwd' in key:
-                if reg_type == 4:  # REG_DWORD
-                    laps_settings[value_name] = struct.unpack('<I', data)[0] if data_size >= 4 else 0
-                elif reg_type == 1:  # REG_SZ
-                    laps_settings[value_name] = data.decode('utf-16-le', errors='ignore').rstrip('\x00')
-                else:
-                    laps_settings[value_name] = data
+            key_lower = key.lower().rstrip('\\')
+            if key_lower == self.WINDOWS_LAPS_KEY:
+                kind = 'windows'
+            elif key_lower == self.LEGACY_LAPS_KEY:
+                kind = 'legacy'
+            else:
+                continue
+            if reg_type == 4:  # REG_DWORD
+                settings[kind][value_name] = struct.unpack('<I', data[:4])[0] if data_size >= 4 else 0
+            elif reg_type in (1, 2):  # REG_SZ / REG_EXPAND_SZ
+                settings[kind][value_name] = data.decode('utf-16-le', errors='ignore').rstrip('\x00')
+            else:
+                settings[kind][value_name] = data
         
-        if not laps_settings:
+        if not settings['windows'] and not settings['legacy']:
             self.logger.info(f"[*] No LAPS-specific settings found in {gpo_name}")
             return
         
         self.logger.info(f"[+] Found LAPS policy settings for {gpo_name}")
-        
         policy_lines = [f"LAPS Policy: {gpo_name}", ""]
         findings = []
         
-        admin_account = laps_settings.get('AdminAccountName')
-        if admin_account is None or admin_account == '':
-            self.logger.warning("[!] The LAPS local admin user is the default administrator account")
-            findings.append("AdminAccountName: Using default administrator account")
-            policy_lines.append("AdminAccountName: <default administrator>")
-        else:
-            self.logger.success(f"[+] The LAPS local admin user is not the default: {admin_account}")
-            policy_lines.append(f"AdminAccountName: {admin_account}")
+        for kind in ('windows', 'legacy'):
+            if settings[kind]:
+                label = 'Windows LAPS' if kind == 'windows' else 'Legacy Microsoft LAPS'
+                policy_lines.append(f"[{label}]")
+                findings.extend(self._evaluate_laps_settings(kind, settings[kind], policy_lines))
+                policy_lines.append("")
         
-        pwd_complexity = laps_settings.get('PasswordComplexity')
-        if pwd_complexity is not None:
-            policy_lines.append(f"PasswordComplexity: {pwd_complexity}")
-            if pwd_complexity == 4:
-                self.logger.success("[+] The password complexity is 4")
-            else:
-                self.logger.finding(f"The password complexity is {pwd_complexity} (should be 4)")
-                findings.append(f"PasswordComplexity: {pwd_complexity} (recommended: 4)")
-        
-        pwd_length = laps_settings.get('PasswordLength')
-        if pwd_length is not None:
-            policy_lines.append(f"PasswordLength: {pwd_length}")
-            if pwd_length == 14:
-                self.logger.warning("[!] The password length is the default 14")
-                findings.append("PasswordLength: 14 (default, consider increasing)")
-            elif pwd_length < 14:
-                self.logger.finding(f"The password length is {pwd_length} (less than 14)")
-                findings.append(f"PasswordLength: {pwd_length} (should be at least 14)")
-            else:
-                self.logger.success(f"[+] The password length is {pwd_length} (longer than default)")
-        
-        pwd_age = laps_settings.get('PasswordAgeDays')
-        if pwd_age is not None:
-            policy_lines.append(f"PasswordAgeDays: {pwd_age}")
-            if pwd_age == 30:
-                self.logger.warning("[!] The password age days is the default 30")
-            elif pwd_age < 30:
-                self.logger.success(f"[+] The password age days is {pwd_age} (less than 30)")
-            else:
-                self.logger.finding(f"The password age days is {pwd_age} (more than 30)")
-                findings.append(f"PasswordAgeDays: {pwd_age} (should be 30 or less)")
-        
-        pwd_expiration = laps_settings.get('PwdExpirationProtectionEnabled')
-        if pwd_expiration is not None:
-            policy_lines.append(f"PwdExpirationProtectionEnabled: {pwd_expiration}")
-            if pwd_expiration == 1:
-                self.logger.success("[+] PwdExpirationProtectionEnabled is enabled")
-            else:
-                self.logger.finding("PwdExpirationProtectionEnabled is disabled or not configured")
-                findings.append("PwdExpirationProtectionEnabled: Disabled (should be enabled)")
-        else:
-            self.logger.finding("PwdExpirationProtectionEnabled is not configured (defaults to disabled)")
-            findings.append("PwdExpirationProtectionEnabled: Not configured (defaults to disabled)")
-        
-        admpwd_enabled = laps_settings.get('AdmPwdEnabled')
-        if admpwd_enabled is not None:
-            policy_lines.append(f"AdmPwdEnabled: {admpwd_enabled}")
-            if admpwd_enabled == 1:
-                self.logger.success("[+] The LAPS policy is enabled")
-            else:
-                self.logger.finding("The LAPS policy is disabled")
-                findings.append("AdmPwdEnabled: Disabled (LAPS policy not active)")
-        
-        policy_lines.append("")
         if findings:
             policy_lines.append("Findings:")
             policy_lines.extend([f"  - {f}" for f in findings])
@@ -298,8 +279,9 @@ class LAPSChecker:
         
         policy_lines.append("")
         policy_lines.append("All Settings:")
-        for key, value in laps_settings.items():
-            policy_lines.append(f"  {key}: {value}")
+        for kind in ('windows', 'legacy'):
+            for key, value in settings[kind].items():
+                policy_lines.append(f"  {key}: {value}")
         
         # Only report as a finding if the policy is actually weak
         if findings:
@@ -307,6 +289,99 @@ class LAPSChecker:
         else:
             filepath = self.output_paths['checks'] / 'laps_policy.txt'
         write_file('\n'.join(policy_lines), filepath, self.logger)
+    
+    def _evaluate_laps_settings(self, kind: str, laps_settings: Dict, policy_lines: List[str]) -> List[str]:
+        """Evaluate one set of LAPS settings. Missing values use the documented defaults
+        (Windows LAPS: https://learn.microsoft.com/windows-server/identity/laps/laps-management-policy-settings).
+        """
+        findings = []
+        prefix = 'Windows LAPS' if kind == 'windows' else 'Legacy LAPS'
+        
+        if kind == 'windows':
+            # BackupDirectory: 0 = disabled (default), 1 = Microsoft Entra ID, 2 = Active Directory
+            backup = laps_settings.get('BackupDirectory', 0)
+            backup_desc = {0: 'Disabled', 1: 'Microsoft Entra ID', 2: 'Active Directory'}.get(backup, f'Unknown ({backup})')
+            policy_lines.append(f"BackupDirectory: {backup} ({backup_desc})")
+            if backup == 0:
+                self.logger.finding(f"{prefix}: BackupDirectory is disabled - passwords aren't backed up, LAPS isn't active")
+                findings.append(f"{prefix}: BackupDirectory disabled (LAPS not active)")
+            else:
+                self.logger.success(f"[+] {prefix}: passwords are backed up to {backup_desc}")
+            admin_name_key, expiration_key, expiration_default = 'AdministratorAccountName', 'PasswordExpirationProtectionEnabled', 1
+        else:
+            enabled = laps_settings.get('AdmPwdEnabled')
+            if enabled is not None:
+                policy_lines.append(f"AdmPwdEnabled: {enabled}")
+                if enabled == 1:
+                    self.logger.success(f"[+] {prefix}: the LAPS policy is enabled")
+                else:
+                    self.logger.finding(f"{prefix}: the LAPS policy is disabled")
+                    findings.append("AdmPwdEnabled: Disabled (LAPS policy not active)")
+            admin_name_key, expiration_key, expiration_default = 'AdminAccountName', 'PwdExpirationProtectionEnabled', 0
+        
+        admin_account = laps_settings.get(admin_name_key)
+        if not admin_account:
+            self.logger.warning(f"[!] {prefix}: the LAPS local admin user is the default administrator account")
+            findings.append(f"{admin_name_key}: Using default administrator account")
+            policy_lines.append(f"{admin_name_key}: <default administrator>")
+        else:
+            self.logger.success(f"[+] {prefix}: the LAPS local admin user is not the default: {admin_account}")
+            policy_lines.append(f"{admin_name_key}: {admin_account}")
+        
+        # PasswordComplexity: 4 = all character sets (default). Windows LAPS also has
+        # 5 (improved readability) and 6-8 (passphrases).
+        pwd_complexity = laps_settings.get('PasswordComplexity')
+        if pwd_complexity is not None:
+            policy_lines.append(f"PasswordComplexity: {pwd_complexity}")
+            if pwd_complexity >= 4:
+                self.logger.success(f"[+] {prefix}: the password complexity is {pwd_complexity}")
+            else:
+                self.logger.finding(f"{prefix}: the password complexity is {pwd_complexity} (should be 4 or higher)")
+                findings.append(f"PasswordComplexity: {pwd_complexity} (recommended: 4 or higher)")
+        
+        pwd_length = laps_settings.get('PasswordLength')
+        if pwd_length is not None:
+            policy_lines.append(f"PasswordLength: {pwd_length}")
+            if pwd_length == 14:
+                self.logger.warning(f"[!] {prefix}: the password length is the default 14")
+                findings.append("PasswordLength: 14 (default, consider increasing)")
+            elif pwd_length < 14:
+                self.logger.finding(f"{prefix}: the password length is {pwd_length} (less than 14)")
+                findings.append(f"PasswordLength: {pwd_length} (should be at least 14)")
+            else:
+                self.logger.success(f"[+] {prefix}: the password length is {pwd_length} (longer than default)")
+        
+        pwd_age = laps_settings.get('PasswordAgeDays')
+        if pwd_age is not None:
+            policy_lines.append(f"PasswordAgeDays: {pwd_age}")
+            if pwd_age == 30:
+                self.logger.warning(f"[!] {prefix}: the password age days is the default 30")
+            elif pwd_age < 30:
+                self.logger.success(f"[+] {prefix}: the password age days is {pwd_age} (less than 30)")
+            else:
+                self.logger.finding(f"{prefix}: the password age days is {pwd_age} (more than 30)")
+                findings.append(f"PasswordAgeDays: {pwd_age} (should be 30 or less)")
+        
+        # Windows LAPS enables expiration protection by default; legacy LAPS doesn't
+        pwd_expiration = laps_settings.get(expiration_key, expiration_default)
+        configured = 'configured' if expiration_key in laps_settings else 'default'
+        policy_lines.append(f"{expiration_key}: {pwd_expiration} ({configured})")
+        if pwd_expiration == 1:
+            self.logger.success(f"[+] {prefix}: {expiration_key} is enabled ({configured})")
+        else:
+            self.logger.finding(f"{prefix}: {expiration_key} is disabled ({configured})")
+            findings.append(f"{expiration_key}: Disabled ({configured}, should be enabled)")
+        
+        if kind == 'windows':
+            # ADPasswordEncryptionEnabled defaults to 1; 0 stores the password in
+            # cleartext in msLAPS-Password
+            encryption = laps_settings.get('ADPasswordEncryptionEnabled', 1)
+            policy_lines.append(f"ADPasswordEncryptionEnabled: {encryption}")
+            if encryption == 0 and laps_settings.get('BackupDirectory', 0) == 2:
+                self.logger.finding(f"{prefix}: password encryption in AD is disabled (stored in cleartext in msLAPS-Password)")
+                findings.append("ADPasswordEncryptionEnabled: Disabled (password stored unencrypted in AD)")
+        
+        return findings
     
     def _check_laps_schema(self) -> dict:
         """Check which LAPS schema extensions are installed.

@@ -1,7 +1,8 @@
 """SQL Server enumeration and checks using netexec."""
 
+import re
 import subprocess
-from typing import Dict, List
+from typing import Dict, List, Tuple
 from pathlib import Path
 
 from ...utils.logger import get_logger
@@ -94,6 +95,7 @@ class SQLChecker:
             lines = []
             for item in impersonate_privs:
                 lines.append(f"Host: {item['host']}")
+                lines.append("  Logins that can be impersonated (IMPERSONATE grantors):")
                 for user in item['users']:
                     lines.append(f"  - {user}")
                 lines.append("")
@@ -190,36 +192,94 @@ class SQLChecker:
             self.logger.error(f"[-] Error running netexec MSSQL {module} module for {host}: {e}")
             return ""
     
+    @staticmethod
+    def _module_messages(output: str) -> List[Tuple[str, str]]:
+        """Split netexec output into (status, message) pairs.
+
+        NetExec prints module lines as
+        '<MODULE> <ip> <port> <hostname> [*|+|-] <message>' (nxc/logger.py),
+        so the message has to be taken from after the status marker.
+        """
+        messages = []
+        for line in re.sub(r'\x1b\[[0-9;]*m', '', output).split('\n'):
+            match = re.search(r'\[([*+-])\] (.*)$', line)
+            if match:
+                messages.append((match.group(1), match.group(2).strip()))
+        return messages
+
     def _parse_links_output(self, output: str) -> List[str]:
-        """Parse enum_links output for linked servers."""
-        links = []
-        if "Linked servers found:" in output:
-            in_links = False
-            for line in output.split('\n'):
-                if "Linked servers found:" in line:
-                    in_links = True
-                    continue
-                if in_links and line.strip().startswith('-'):
-                    link = line.strip()[1:].strip()
-                    if link:
-                        links.append(link)
-                elif in_links and not line.strip().startswith('-'):
-                    break
-        return links
-    
+        """Parse enum_links output for linked servers.
+
+        NetExec prints a 'Linked servers found:' block with '- <server>' entries
+        (sys.servers), and as sysadmin a second block with 'Linked server: <name>'
+        followed by '- Local login: ...' / '- Remote login: ...' (sp_helplinkedsrvlogin).
+        """
+        links: List[str] = []
+        mappings: List[str] = []
+        in_block = False
+        current = None
+        login = {}
+
+        def flush_mapping():
+            if current and login:
+                mappings.append(
+                    f"{current}: local login {login.get('Local', '?')} -> remote login {login.get('Remote', '?')}"
+                )
+
+        for status, msg in self._module_messages(output):
+            if msg == 'Linked servers found:':
+                flush_mapping()
+                in_block, current, login = True, None, {}
+                continue
+            if not in_block:
+                continue
+            if status != '*':
+                flush_mapping()
+                in_block, current, login = False, None, {}
+                continue
+
+            server_match = re.match(r'Linked server: (.+)$', msg)
+            login_match = re.match(r'- (Local|Remote) login: (.*)$', msg)
+            item_match = re.match(r'- (.+)$', msg)
+            if server_match:
+                flush_mapping()
+                current, login = server_match.group(1).strip(), {}
+                if current not in links:
+                    links.append(current)
+            elif login_match and current:
+                if login_match.group(1) in login:
+                    # sp_helplinkedsrvlogin can list several logins per server
+                    flush_mapping()
+                    login = {}
+                login[login_match.group(1)] = login_match.group(2).strip()
+            elif item_match:
+                name = item_match.group(1).strip()
+                if name and name not in links:
+                    links.append(name)
+        flush_mapping()
+
+        return links + [f"login mapping - {m}" for m in mappings]
+
     def _parse_impersonate_output(self, output: str) -> List[str]:
-        """Parse enum_impersonate output for users with impersonation rights."""
-        users = []
-        if "Users with impersonation rights:" in output:
-            in_users = False
-            for line in output.split('\n'):
-                if "Users with impersonation rights:" in line:
-                    in_users = True
-                    continue
-                if in_users and line.strip().startswith('-'):
-                    user = line.strip()[1:].strip()
-                    if user:
-                        users.append(user)
-                elif in_users and not line.strip().startswith('-'):
-                    break
+        """Parse enum_impersonate output.
+
+        NetExec's query selects the *grantor* of IMPERSONATE permissions, i.e. the
+        logins that can be impersonated, despite its 'Users with impersonation
+        rights:' header.
+        """
+        users: List[str] = []
+        in_block = False
+        for status, msg in self._module_messages(output):
+            if msg == 'Users with impersonation rights:':
+                in_block = True
+                continue
+            if not in_block:
+                continue
+            item_match = re.match(r'- (.+)$', msg)
+            if status == '*' and item_match:
+                user = item_match.group(1).strip()
+                if user and user not in users:
+                    users.append(user)
+            else:
+                in_block = False
         return users

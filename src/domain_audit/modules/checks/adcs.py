@@ -185,7 +185,16 @@ class ADCSChecker:
         # Handle case where templates is a string error message instead of dict
         if not templates or not isinstance(templates, dict):
             if isinstance(templates, str):
-                self.logger.warning(f"[!] certipy: {templates}")
+                # With -vulnerable, certipy reports "Could not find any certificate
+                # templates" both when no template is vulnerable and when none could be
+                # read, so this needs a manual check.
+                if 'Could not find any certificate templates' in templates:
+                    self.logger.warning(
+                        f"[!] certipy: {templates} - either none are vulnerable or the templates "
+                        "couldn't be read; verify manually (e.g. certipy find without -vulnerable)"
+                    )
+                else:
+                    self.logger.warning(f"[!] certipy: {templates}")
         else:
             for idx, template in templates.items():
                 # Handle case where template might be a string instead of dict
@@ -221,9 +230,9 @@ class ADCSChecker:
                         self.logger.info(f"    [*] Enrollable by: {', '.join(enrollable)}")
         
         if vulnerable_templates:
-            self.logger.warning(f"[!] Found {len(vulnerable_templates)} vulnerable certificate template(s)")
+            self.logger.finding(f"Found {len(vulnerable_templates)} vulnerable certificate template(s)/CA(s)")
             # Write summary to file
-            vuln_summary = self.output_paths['checks'] / 'ADCS_vulnerabilities.txt'
+            vuln_summary = self.output_paths['findings'] / 'ADCS_vulnerabilities.txt'
             with open(vuln_summary, 'w') as f:
                 for entry in vulnerable_templates:
                     f.write(f"Template: {entry['template_name']}\n")

@@ -1,5 +1,7 @@
 """Access checks using netexec for SMB, RDP, WINRM, and MSSQL."""
 
+import configparser
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -28,30 +30,30 @@ class AccessChecker:
         self.pwn3d_label = self._get_pwn3d_label()
     
     def _get_pwn3d_label(self) -> str:
-        """Read pwn3d_label from ~/.nxc/nxc.conf, default to 'Pwn3d!'."""
+        """Read the pwn3d label the same way NetExec does.
+
+        NetExec (nxc/paths.py, nxc/config.py) reads $NXC_PATH/nxc.conf, or
+        ~/.nxc/nxc.conf when NXC_PATH isn't set, and uses
+        config.get("nxc", "pwn3d_label", fallback="Pwn3d!").
+        """
         default_label = "Pwn3d!"
-        config_path = Path.home() / ".nxc" / "nxc.conf"
-        
+        nxc_path = os.environ.get("NXC_PATH")
+        config_path = Path(os.path.normpath(nxc_path)) if nxc_path else Path.home() / ".nxc"
+        config_path = config_path / "nxc.conf"
+
         if not config_path.exists():
             self.logger.debug(f"nxc config not found at {config_path}, using default pwn3d_label: {default_label}")
             return default_label
-        
+
         try:
-            with open(config_path, 'r') as f:
-                for line in f:
-                    line = line.strip()
-                    if line.startswith('pwn3d_label'):
-                        # Parse: pwn3d_label = Pwn3d!
-                        parts = line.split('=', 1)
-                        if len(parts) == 2:
-                            label = parts[1].strip()
-                            self.logger.debug(f"Found pwn3d_label in config: {label}")
-                            return label
+            config = configparser.ConfigParser()
+            config.read(config_path)
+            label = config.get("nxc", "pwn3d_label", fallback=default_label)
+            self.logger.debug(f"Using pwn3d_label from {config_path}: {label!r}")
+            return label
         except Exception as e:
-            self.logger.debug(f"Error reading nxc config: {e}")
-        
-        self.logger.debug(f"pwn3d_label not found in config, using default: {default_label}")
-        return default_label
+            self.logger.debug(f"Error reading nxc config {config_path}: {e}")
+            return default_label
     
     def check_access(self):
         """Run all access checks."""
@@ -129,9 +131,14 @@ class AccessChecker:
         Returns list of (IP, Computername) tuples.
         """
         results = []
-        
-        for line in output.split('\n'):
-            if self.pwn3d_label in line:
+        # NetExec prints the label as "(<label>)" after the credentials on [+]
+        # lines (mark_pwned in nxc/connection.py). Matching that exact form on
+        # success lines avoids false hits when the label is short or empty, or
+        # appears in a hostname/username.
+        marker = f"({self.pwn3d_label})"
+
+        for line in re.sub(r'\x1b\[[0-9;]*m', '', output).split('\n'):
+            if '[+]' in line and line.rstrip().endswith(marker):
                 # Extract IP and hostname from line
                 # Example: RDP  10.6.10.11  3389  WINTERFELL  [+] ... (Pwn3d!)
                 ip_match = re.search(r'\b(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\b', line)
@@ -268,8 +275,13 @@ class AccessChecker:
             self.logger.success("[+] There are no systems where the current user has access over WINRM")
     
     def _check_rdp_access(self):
-        """Check for local admin access over RDP."""
-        self.logger.info("---Checking for local admin access over RDP---")
+        """Check where the current user can log on over RDP.
+
+        NetExec's RDP pwn3d label means an interactive session was opened
+        (Save Session Info PDU received), i.e. the user has the RDP logon right
+        (e.g. via Remote Desktop Users) - it does not mean local admin.
+        """
+        self.logger.info("---Checking for RDP logon access---")
         
         hosts_file = self._get_hosts_file('scandata_hostalive_rdp.txt', 'RDP')
         if not hosts_file:
@@ -286,15 +298,15 @@ class AccessChecker:
         # Debug: show raw output
         self.logger.debug(f"Raw netexec RDP output:\n{output}")
         
-        # Check for local admin access
+        # Check for RDP logon access (pwn3d label = interactive session opened)
         results = self._parse_pwn3d_output(output)
-        
+
         if results:
             formatted = self._format_results(results)
-            self.logger.finding(f"There are {len(formatted)} systems where the current user has local admin over RDP")
-            write_lines(formatted, self.output_paths['findings'] / 'access_localadmin_rdp.txt')
+            self.logger.finding(f"There are {len(formatted)} systems where the current user can log on over RDP")
+            write_lines(formatted, self.output_paths['findings'] / 'access_rdp.txt')
         else:
-            self.logger.success("[+] There are no systems where the current user has local admin over RDP")
+            self.logger.success("[+] There are no systems where the current user can log on over RDP")
         
         # Check for NLA disabled
         self.logger.info("---Checking for RDP NLA configuration---")

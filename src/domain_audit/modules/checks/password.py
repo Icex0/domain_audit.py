@@ -180,41 +180,31 @@ class PasswordChecker:
             findings = []
             policy_lines = ["Kerberos Policy Settings:", ""]
             
-            # MaxTicketAge (TGT lifetime in hours) - Default/Recommended: 10
-            max_ticket_age = kerberos_policy.get('MaxTicketAge', DEFAULT_KERBEROS_POLICY['MaxTicketAge'])
-            policy_lines.append(f"  TGT Lifetime (MaxTicketAge): {max_ticket_age} hours")
-            if max_ticket_age != 10:
-                self.logger.finding(f"TGT lifetime is {max_ticket_age} hours (recommended: 10)")
-                findings.append(f"TGT lifetime is {max_ticket_age} hours (recommended: 10)")
-            else:
-                self.logger.success(f"[+] TGT lifetime is {max_ticket_age} hours")
-            
-            # MaxRenewAge (TGT renewal in days) - Default/Recommended: 7
-            max_renew_age = kerberos_policy.get('MaxRenewAge', DEFAULT_KERBEROS_POLICY['MaxRenewAge'])
-            policy_lines.append(f"  TGT Renewal Lifetime (MaxRenewAge): {max_renew_age} days")
-            if max_renew_age != 7:
-                self.logger.finding(f"TGT renewal lifetime is {max_renew_age} days (recommended: 7)")
-                findings.append(f"TGT renewal lifetime is {max_renew_age} days (recommended: 7)")
-            else:
-                self.logger.success(f"[+] TGT renewal lifetime is {max_renew_age} days")
-            
-            # MaxServiceAge (Service ticket lifetime in minutes) - Default/Recommended: 600
-            max_service_age = kerberos_policy.get('MaxServiceAge', DEFAULT_KERBEROS_POLICY['MaxServiceAge'])
-            policy_lines.append(f"  Service Ticket Lifetime (MaxServiceAge): {max_service_age} minutes")
-            if max_service_age != 600:
-                self.logger.finding(f"Service ticket lifetime is {max_service_age} minutes (recommended: 600)")
-                findings.append(f"Service ticket lifetime is {max_service_age} minutes (recommended: 600)")
-            else:
-                self.logger.success(f"[+] Service ticket lifetime is {max_service_age} minutes")
-            
-            # MaxClockSkew (Clock skew tolerance in minutes) - Default/Recommended: 5
-            max_clock_skew = kerberos_policy.get('MaxClockSkew', DEFAULT_KERBEROS_POLICY['MaxClockSkew'])
-            policy_lines.append(f"  Clock Skew Tolerance (MaxClockSkew): {max_clock_skew} minutes")
-            if max_clock_skew != 5:
-                self.logger.warning(f"[!] Clock skew tolerance is {max_clock_skew} minutes (recommended: 5)")
-                findings.append(f"Clock skew tolerance is {max_clock_skew} minutes (recommended: 5)")
-            else:
-                self.logger.success(f"[+] Clock skew tolerance is {max_clock_skew} minutes")
+            # Lifetimes: only values longer than Microsoft's default are weaker, a
+            # shorter lifetime is stricter. For the three ticket lifetimes, 0 means
+            # "never expires" (Microsoft Kerberos Policy docs), so 0 is weak too.
+            # (key, label, unit, recommended max, 0 means unlimited)
+            lifetime_settings = [
+                ('MaxTicketAge', 'TGT lifetime', 'hours', 10, True),
+                ('MaxRenewAge', 'TGT renewal lifetime', 'days', 7, True),
+                ('MaxServiceAge', 'Service ticket lifetime', 'minutes', 600, True),
+                ('MaxClockSkew', 'Clock skew tolerance', 'minutes', 5, False),
+            ]
+            for key, label, unit, recommended, zero_is_unlimited in lifetime_settings:
+                value = kerberos_policy.get(key, DEFAULT_KERBEROS_POLICY[key])
+                policy_lines.append(f"  {label} ({key}): {value} {unit}")
+                if not isinstance(value, int):
+                    self.logger.warning(f"[!] {label} has an unexpected value: {value}")
+                    continue
+                if zero_is_unlimited and value == 0:
+                    message = f"{label} is 0 (never expires) - recommended: {recommended} {unit} or less"
+                elif value > recommended:
+                    message = f"{label} is {value} {unit} (recommended: {recommended} or less)"
+                else:
+                    self.logger.success(f"[+] {label} is {value} {unit}")
+                    continue
+                self.logger.finding(message)
+                findings.append(message)
             
             # TicketValidateClient - Recommended: 1 (enabled)
             validate_client = kerberos_policy.get('TicketValidateClient', DEFAULT_KERBEROS_POLICY['TicketValidateClient'])
@@ -266,27 +256,43 @@ class PasswordChecker:
         self.logger.info("---Checking Fine-grained password policy---")
         
         try:
+            # msDS-ResultantPSO is the effective PSO (also when applied via a group);
+            # msDS-PSOApplied only lists PSOs targeted at the object directly.
+            # Verified in a lab: a normal domain user can read msDS-ResultantPSO of
+            # other users in a paged subtree search, but can't read the PSO objects
+            # (so their lockout threshold is unknown).
             all_users = self.ldap.query(
                 search_base=self.base_dn,
-                search_filter='(&(objectClass=user)(!(userAccountControl:1.2.840.113556.1.4.803:=2)))',
-                attributes=['sAMAccountName', 'msDS-PSOApplied', 'userAccountControl']
+                search_filter='(&(objectCategory=person)(objectClass=user)(!(userAccountControl:1.2.840.113556.1.4.803:=2)))',
+                attributes=['sAMAccountName', 'msDS-ResultantPSO']
             )
             
-            users_with_pso = [u for u in all_users if u.get('msDS-PSOApplied')]
+            users_with_pso = []
+            users_without_pso = []
+            for user in all_users:
+                pso = user.get('msDS-ResultantPSO')
+                if isinstance(pso, list):
+                    pso = pso[0] if pso else None
+                if pso:
+                    users_with_pso.append({'sAMAccountName': user.get('sAMAccountName', ''), 'msDS-ResultantPSO': pso})
+                else:
+                    users_without_pso.append(user)
             filepath = self.output_paths['data'] / 'users_finegrainedpasswordpolicy.txt'
             
             if users_with_pso:
                 count = len(users_with_pso)
-                self.logger.finding(f"There are {count} users with fine-grained password policy")
+                pso_names = sorted({u['msDS-ResultantPSO'].split(',')[0].replace('CN=', '') for u in users_with_pso})
+                self.logger.finding(f"There are {count} users with a fine-grained password policy ({', '.join(pso_names)})")
                 write_csv(users_with_pso, filepath)
                 
-                users_without_pso = [u for u in all_users if not u.get('msDS-PSOApplied')]
-                
                 if users_without_pso:
+                    # Users without a PSO follow the domain password policy. Users with a
+                    # PSO are left out: their lockout threshold may be stricter and the
+                    # PSO itself usually isn't readable for a normal user.
                     spray_list = [u.get('sAMAccountName', '') for u in users_without_pso if u.get('sAMAccountName')]
                     spray_file = self.output_paths['data'] / 'users_NO_finegrainedpasswordpolicy.txt'
                     write_lines(spray_list, spray_file)
-                    self.logger.finding("If you don't want to lockout users, spray with this list!")
+                    self.logger.finding("If you don't want to lockout users, spray with this list (domain lockout policy applies)!")
             else:
                 self.logger.success("[+] There were no users with a fine-grained password policy")
                 

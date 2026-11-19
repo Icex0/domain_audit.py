@@ -142,8 +142,8 @@ class DescriptionChecker:
                         suspicious.append(computer)
                 
                 if suspicious:
-                    self.logger.finding(f"{len(suspicious)} computers have password-related keywords in description!")
-                    suspicious_file = self.output_paths['findings'] / 'description_computers_passstrings.txt'
+                    self.logger.warning(f"[!] {len(suspicious)} computers have password-related keywords in description!")
+                    suspicious_file = self.output_paths['checks'] / 'description_computers_passstrings.txt'
                     write_csv(suspicious, suspicious_file)
                 else:
                     self.logger.success("[+] No password-related keywords in computer descriptions")
