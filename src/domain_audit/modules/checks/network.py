@@ -327,8 +327,8 @@ class NetworkChecker:
                     is_open = future.result()
                     if is_open and port not in host.open_ports:
                         host.open_ports.append(port)
-                except Exception:
-                    pass
+                except Exception as e:
+                    self.logger.debug(f"Port check {host.ip}:{port} failed: {e}")
         
         # Process results
         for host in hosts:

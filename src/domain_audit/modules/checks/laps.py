@@ -1,14 +1,14 @@
 """LAPS security checks."""
 
-import io
 import struct
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List
 from pathlib import Path
 
 from ...utils.logger import get_logger
 from ...utils.ldap import LDAPConnection
 from ...utils.output import write_file, write_lines, write_csv
 from ...utils.registry_pol import parse_pol_file
+from ...utils.sysvol import MACHINE_REGISTRY_POL, SysvolClient, has_credentials
 
 
 class LAPSChecker:
@@ -16,7 +16,7 @@ class LAPSChecker:
     
     def __init__(self, ldap_conn: LDAPConnection, output_paths: Dict[str, Path],
                  server: str = None, username: str = None, password: str = None,
-                 domain: str = None):
+                 domain: str = None, hashes: str = None):
         self.ldap = ldap_conn
         self.output_paths = output_paths
         self.logger = get_logger()
@@ -24,6 +24,7 @@ class LAPSChecker:
         self.server = server or ldap_conn.config.server
         self.username = username
         self.password = password
+        self.hashes = hashes
         self.domain = domain or ldap_conn.config.domain
     
     def check_laps(self):
@@ -34,7 +35,7 @@ class LAPSChecker:
             gpos = self.ldap.query(
                 search_base=f"CN=Policies,CN=System,{self.base_dn}",
                 search_filter='(displayName=*LAPS*)',
-                attributes=['displayName', 'gPCFileSysPath']
+                attributes=['displayName', 'cn', 'gPCFileSysPath']
             )
             
             gpo_file = self.output_paths['data'] / 'laps_gpo.txt'
@@ -45,9 +46,9 @@ class LAPSChecker:
                 write_csv(gpos, gpo_file)
                 
                 for gpo in gpos:
-                    gpo_dn = gpo.get('dn', '')
-                    if 'CN={' in gpo_dn:
-                        guid = gpo_dn.split('CN={')[1].split('}')[0]
+                    # cn of a groupPolicyContainer is the GPO GUID, e.g. {31B2F340-...}
+                    guid = str(gpo.get('cn') or '').strip('{}')
+                    if guid:
                         
                         linked_ous = self.ldap.query(
                             search_base=self.base_dn,
@@ -75,7 +76,9 @@ class LAPSChecker:
             # in the schema partition, avoiding a noisy LDAP error on the main query
             laps_types = self._check_laps_schema()
             
-            if not laps_types['legacy'] and not laps_types['windows']:
+            if laps_types is None:
+                self.logger.warning("[!] LAPS deployment could not be checked - verify manually")
+            elif not laps_types['legacy'] and not laps_types['windows']:
                 self.logger.finding("LAPS schema not installed (neither legacy nor Windows LAPS attributes found)")
                 findings_file = self.output_paths['findings'] / 'laps_notenabled.txt'
                 write_file("LAPS SCHEMA NOT INSTALLED", findings_file, self.logger)
@@ -164,67 +167,31 @@ class LAPSChecker:
             self.logger.error(f"[-] Error checking LAPS: {e}")
     
     def _check_laps_policy(self, gpos: List[Dict]):
-        """Check LAPS policy settings from GPO Registry.pol files."""
+        """Check LAPS policy settings from the GPOs' Machine/Registry.pol."""
         self.logger.info("---Checking the LAPS policy for each GPO---")
         
-        if not self.username or not self.password:
+        if not has_credentials(self.username, self.password, self.hashes):
             self.logger.warning("[!] LAPS policy check requires SMB credentials")
             return
         
         try:
-            from impacket.smbconnection import SMBConnection
-        except ImportError:
-            self.logger.error("[-] impacket not available for SYSVOL access")
-            return
-        
-        try:
-            conn = SMBConnection(self.server, self.server)
-            conn.login(self.username, self.password, self.domain)
-            
-            for gpo in gpos:
-                gpo_name = gpo.get('displayName', 'Unknown')
-                gpc_path = gpo.get('gPCFileSysPath', '')
-                
-                if not gpc_path:
-                    self.logger.warning(f"[!] No gPCFileSysPath for GPO {gpo_name}")
-                    continue
-                
-                # gPCFileSysPath format: \\domain.com\SysVol\domain.com\Policies\{GUID}
-                # We need: domain.com/Policies/{GUID}/Machine/Registry.pol
-                normalized = gpc_path.replace('\\', '/')
-                # Remove leading slashes
-                while normalized.startswith('/'):
-                    normalized = normalized[1:]
-                # Split: domain.com/SysVol/domain.com/Policies/{GUID}
-                parts = normalized.split('/')
-                # Find 'SysVol' or 'SYSVOL' index and take everything after it
-                sysvol_idx = -1
-                for i, part in enumerate(parts):
-                    if part.lower() == 'sysvol':
-                        sysvol_idx = i
-                        break
-                
-                if sysvol_idx == -1 or sysvol_idx + 1 >= len(parts):
-                    self.logger.warning(f"[!] Could not parse gPCFileSysPath for {gpo_name}: {gpc_path}")
-                    continue
-                
-                # Join parts after SYSVOL: domain.com/Policies/{GUID}
-                share_path = '/'.join(parts[sysvol_idx + 1:]) + '/Machine/Registry.pol'
-                
-                try:
-                    content_buffer = io.BytesIO()
-                    conn.getFile('SYSVOL', share_path, content_buffer.write)
-                    content = content_buffer.getvalue()
-                    
-                    if content:
-                        self._analyze_laps_policy(gpo_name, content)
-                except Exception as e:
-                    self.logger.warning(f"[!] Could not read Registry.pol for {gpo_name}: {e}")
-            
-            conn.logoff()
-            
+            sysvol = SysvolClient.shared(self.ldap, self.domain, self.username, self.password, self.hashes, self.logger)
         except Exception as e:
             self.logger.error(f"[-] Error connecting to SYSVOL: {e}")
+            return
+        
+        for gpo in gpos:
+            gpo_name = gpo.get('displayName', 'Unknown')
+            # cn of a groupPolicyContainer is the GPO GUID; the SYSVOL folder has the same name
+            guid = str(gpo.get('cn') or '')
+            if not guid.startswith('{'):
+                self.logger.warning(f"[!] Could not determine the GUID of GPO {gpo_name}")
+                continue
+            content = sysvol.gpo_file(guid, MACHINE_REGISTRY_POL)
+            if content:
+                self._analyze_laps_policy(gpo_name, content)
+            else:
+                self.logger.info(f"[*] No Machine/Registry.pol for {gpo_name}")
 
     # Registry.pol keys. Windows LAPS GPO settings live under
     # Software\Microsoft\Windows\CurrentVersion\Policies\LAPS; legacy Microsoft
@@ -397,8 +364,8 @@ class LAPSChecker:
             config_dn = f"CN=Schema,CN=Configuration,{self.base_dn}"
             try:
                 config_dn = f"CN=Schema,{self.ldap.get_config_dn()}"
-            except Exception:
-                pass
+            except Exception as e:
+                self.logger.debug(f"Could not read the configuration NC, using {config_dn}: {e}")
             
             results = self.ldap.query(
                 search_base=config_dn,
@@ -411,6 +378,7 @@ class LAPSChecker:
                     result['legacy'] = True
                 elif attr_name == 'msLAPS-Password':
                     result['windows'] = True
-        except Exception:
-            pass
+        except Exception as e:
+            self.logger.warning(f"[!] Could not read the schema to detect LAPS: {e}")
+            return None
         return result

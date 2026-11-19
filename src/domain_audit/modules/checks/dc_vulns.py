@@ -7,10 +7,14 @@ import os
 from typing import Dict, List
 from pathlib import Path
 
+from impacket.dcerpc.v5 import transport, rprn
+
 from ...utils.logger import get_logger
 from ...utils.ldap import LDAPConnection
 from ...utils.netexec import report_netexec_failure
 from ...utils.output import write_lines
+from ...utils.dc import get_domain_controllers
+from ...utils.sysvol import has_credentials, split_hashes
 
 
 class DCVulnsChecker:
@@ -32,7 +36,7 @@ class DCVulnsChecker:
         """Check all DCs for Zerologon and NoPac vulnerabilities."""
         self.logger.info("---Checking DCs for critical vulnerabilities (Zerologon, NoPac)---")
         
-        if not self.username or not self.password:
+        if not has_credentials(self.username, self.password, self.hashes):
             self.logger.warning("[!] DC vulnerability checks require credentials")
             return
         
@@ -53,11 +57,7 @@ class DCVulnsChecker:
         """Get IP addresses of Domain Controllers."""
         try:
             # Query for domain controllers
-            results = self.ldap.query(
-                search_base=self.base_dn,
-                search_filter='(&(objectClass=computer)(userAccountControl:1.2.840.113556.1.4.803:=8192))',
-                attributes=['dNSHostName', 'name']
-            )
+            results = get_domain_controllers(self.ldap, ['dNSHostName', 'name'])
             
             if not results:
                 return []
@@ -100,7 +100,7 @@ class DCVulnsChecker:
             cmd = [
                 'netexec', 'smb', hosts_file,
                 '-u', self.username,
-                '-p', self.password,
+                *(['-H', self.hashes] if self.hashes and not self.password else ['-p', self.password]),
                 '-M', 'nopac',
                 '-M', 'zerologon'
             ]
@@ -238,3 +238,80 @@ class DCVulnsChecker:
             write_lines(findings, self.output_paths['findings'] / 'dc_nopac_vulnerable.txt')
         else:
             self.logger.success("[+] No DCs vulnerable to NoPac")
+
+    def check_printspooler(self):
+        """Check if PrintSpooler service is running on DCs using impacket RPC."""
+        self.logger.info("---Checking PrintSpooler service on DCs---")
+        
+        try:
+            dcs = get_domain_controllers(self.ldap, ['dNSHostName', 'name'])
+            
+            if not dcs:
+                self.logger.info("[*] No domain controllers found")
+                return
+            
+            spooler_enabled = []
+            spooler_unknown = []
+
+            for dc in dcs:
+                hostname = dc.get('dNSHostName', '')
+                name = dc.get('name', '')
+
+                if not hostname:
+                    continue
+
+                # Check for MS-RPRN (Print Spooler) using impacket
+                status, detail = self._check_spooler_rpc(hostname)
+                if status is True:
+                    self.logger.finding(f"PrintSpooler enabled on {name}")
+                    spooler_enabled.append(f"{name} ({hostname})")
+                elif status is False:
+                    self.logger.success(f"[+] PrintSpooler disabled on {name}")
+                else:
+                    self.logger.warning(f"[!] PrintSpooler status unknown on {name}: {detail}")
+                    spooler_unknown.append(f"{name} ({hostname}): {detail}")
+
+            if spooler_enabled:
+                write_lines(spooler_enabled,
+                           self.output_paths['findings'] / 'printspooler_domaincontrollers.txt')
+            if spooler_unknown:
+                write_lines(spooler_unknown,
+                           self.output_paths['checks'] / 'printspooler_domaincontrollers_unknown.txt')
+                                           
+        except Exception as e:
+            self.logger.error(f"[-] Error checking PrintSpooler: {e}")
+    
+    def _check_spooler_rpc(self, target: str):
+        """Check if the Print Spooler RPC interface is available on target.
+
+        Returns (status, detail): status is True (running), False (not running:
+        the \\pipe\\spoolss named pipe doesn't exist) or None (unknown, e.g.
+        authentication failure, access denied or timeout).
+        """
+        try:
+            # Try to bind to the MS-RPRN interface
+            string_binding = f'ncacn_np:{target}[\\pipe\\spoolss]'
+            rpc_transport = transport.DCERPCTransportFactory(string_binding)
+            
+            # Set credentials if available (password or NT hash)
+            if has_credentials(self.username, self.password, self.hashes):
+                lmhash, nthash = split_hashes(self.hashes)
+                rpc_transport.set_credentials(self.username, self.password or '', self.domain, lmhash, nthash)
+            
+            rpc_transport.set_connect_timeout(10)
+            
+            dce = rpc_transport.get_dce_rpc()
+            dce.connect()
+            dce.bind(rprn.MSRPC_UUID_RPRN)
+            
+            # If we get here, spooler is running
+            dce.disconnect()
+            return True, ''
+
+        except Exception as e:
+            self.logger.debug(f"Spooler check failed for {target}: {e}")
+            # A stopped spooler removes the spoolss pipe, so opening it fails with
+            # STATUS_OBJECT_NAME_NOT_FOUND. Any other error doesn't tell us the state.
+            if 'STATUS_OBJECT_NAME_NOT_FOUND' in str(e):
+                return False, ''
+            return None, str(e) or type(e).__name__

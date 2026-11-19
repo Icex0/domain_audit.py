@@ -73,7 +73,7 @@ class BloodHoundChecker:
         cmd = self._build_netexec_command(dc, collection_method)
         
         try:
-            self.logger.info(f"[*] Starting BloodHound collection (this may take a while)...")
+            self.logger.info("[*] Starting BloodHound collection (this may take a while)...")
             
             result = subprocess.run(
                 cmd,

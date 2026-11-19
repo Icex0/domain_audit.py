@@ -233,6 +233,5 @@ contoso.com-20260201/
 ## TODO
 
 - [ ] Support Kerberos authentication
-- [ ] Support `--hashes` in all checks (Kerberos policy, LAPS, WSUS, NTLM, SYSVOL/NETLOGON, LDAP signing, DC vulnerabilities and spooler use a password only)
 - [ ] Better netexec error handling
 - [ ] Support more MSSQL checks from PowerUpSQL

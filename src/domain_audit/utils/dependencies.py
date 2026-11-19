@@ -416,7 +416,6 @@ def set_dns(dc_ip: str) -> Tuple[bool, str]:
     Returns:
         Tuple of (success, message)
     """
-    logger = get_logger()
     system = platform.system().lower()
     
     if not is_admin():
@@ -589,6 +588,11 @@ def _set_dns_linux(dc_ip: str) -> Tuple[bool, str]:
         except Exception:
             pass
         
+        # Back up the original once (restore_dns() uses it); don't overwrite an
+        # existing backup with an already-modified file on a second run
+        if os.path.exists(resolv_path) and not os.path.exists(backup_path):
+            shutil.copy2(resolv_path, backup_path)
+        
         # Write new resolv.conf
         with open(resolv_path, 'w') as f:
             if search_line:
@@ -747,7 +751,7 @@ def check_and_set_dns(dc_ip: str, domain: str, cmd_args: list = None) -> bool:
     
     logger.warning(f"[!] DNS is not set to DC IP {dc_ip}")
     logger.warning(f"[!] Current DNS: {', '.join(current_dns) if current_dns else 'None detected'}")
-    logger.info(f"[*] Tools may fail to resolve hostnames without proper DNS configuration")
+    logger.info("[*] Tools may fail to resolve hostnames without proper DNS configuration")
     
     # Check if we have admin privileges
     if not is_admin():

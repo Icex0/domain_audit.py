@@ -8,6 +8,7 @@ from ldap3.utils.conv import escape_filter_chars
 from ...utils.logger import get_logger
 from ...utils.ldap import LDAPConnection
 from ...utils.output import write_lines
+from ...utils.admins import AdminResolver
 
 # LDAP_MATCHING_RULE_IN_CHAIN - resolves nested group membership server-side
 IN_CHAIN = '1.2.840.113556.1.4.1941'
@@ -55,27 +56,14 @@ class PrivilegedGroupsChecker:
         self.base_dn = ldap_conn.config.base_dn
         self._domain_sid: Optional[str] = None
         self._admin_dns: Set[str] = set()
+        self.admins = AdminResolver(ldap_conn)
 
     def _get_domain_sid(self) -> Optional[str]:
-        """Get the domain SID."""
-        if self._domain_sid:
-            return self._domain_sid
-
         try:
-            results = self.ldap.query(
-                search_base=self.base_dn,
-                search_filter='(objectClass=domainDNS)',
-                attributes=['objectSid']
-            )
-            if results:
-                sid = results[0].get('objectSid', '')
-                if isinstance(sid, list):
-                    sid = sid[0] if sid else ''
-                self._domain_sid = str(sid)
-                return self._domain_sid
+            return self.admins.domain_sid
         except Exception as e:
             self.logger.error(f"[-] Error getting domain SID: {e}")
-        return None
+            return None
 
     def _find_group(self, group: Dict) -> Optional[Dict]:
         """Look up a group definition from PRIVILEGED_GROUPS (or a SID/RID) in LDAP."""
@@ -105,23 +93,12 @@ class PrivilegedGroupsChecker:
         )
 
     def _load_admin_dns(self):
-        """Collect DNs of Domain Admins, Enterprise Admins and all their (nested) members."""
-        self._admin_dns = set()
-        for rid in (512, 519):
-            try:
-                group = self._find_group({'rid': rid})
-                if not group:
-                    continue
-                group_dn = group.get('distinguishedName', '')
-                if not group_dn:
-                    continue
-                self._admin_dns.add(group_dn.lower())
-                for member in self._get_transitive_members(group_dn):
-                    dn = member.get('distinguishedName', '')
-                    if dn:
-                        self._admin_dns.add(dn.lower())
-            except Exception as e:
-                self.logger.error(f"[-] Error resolving Domain/Enterprise Admins (RID {rid}): {e}")
+        """Admins (see utils.admins): excluded from the privileged group results."""
+        try:
+            self._admin_dns = self.admins.admin_dns()
+        except Exception as e:
+            self.logger.error(f"[-] Error resolving admin accounts: {e}")
+            self._admin_dns = set()
 
     @staticmethod
     def _object_type(member: Dict) -> str:
@@ -197,17 +174,17 @@ class PrivilegedGroupsChecker:
             return
 
         if not members:
-            self.logger.success(f"[+] There are no members in the {label} group that aren't Domain- or Enterprise Administrators")
+            self.logger.success(f"[+] There are no members in the {label} group that aren't admins (Administrators / Domain Admins / Enterprise Admins)")
             return
 
         self.logger.finding(
-            f"{len(members)} members in the {label} group that aren't Domain- or Enterprise Administrators"
+            f"{len(members)} members in the {label} group that aren't admins (Administrators / Domain Admins / Enterprise Admins)"
         )
         lines = [
             f"Group: {label} ({group_dn})",
             f"Risk: members {group['reason']}",
             "",
-            "Members (excluding Domain/Enterprise Admins and their nested members):",
+            "Members (excluding Administrators / Domain Admins / Enterprise Admins and their nested members):",
         ]
         for member in sorted(members, key=lambda m: (m.get('sAMAccountName') or m.get('cn') or '').lower()):
             name = member.get('sAMAccountName') or member.get('cn') or member.get('distinguishedName')

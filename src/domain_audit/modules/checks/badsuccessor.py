@@ -27,6 +27,7 @@ from ...utils.output import write_lines
 from ...utils.acl import (ADS_RIGHT_DS_CREATE_CHILD, SD_FLAGS_OWNER_GROUP_DACL, WRITE_DAC, WRITE_OWNER,
                           right_decisions)
 from ...utils.user_rights import DCUserRights
+from ...utils.dc import get_domain_controllers
 
 # Not "normal users": admins/system, plus principals that only appear on
 # inherit-style ACEs (CREATOR OWNER, SELF) - handled before classification.
@@ -48,11 +49,10 @@ class BadSuccessorChecker:
             config_dn = self.ldap.get_config_dn()
         except Exception:
             config_dn = f"CN=Configuration,{self.base_dn}"
-        self.ldap.connection.search(f"CN=Schema,{config_dn}", '(lDAPDisplayName=msDS-DelegatedManagedServiceAccount)',
-                                    attributes=['schemaIDGUID'])
-        if not self.ldap.connection.entries:
-            return None
-        return str(uuid.UUID(bytes_le=self.ldap.connection.entries[0]['schemaIDGUID'].raw_values[0]))
+        result = self.ldap.query_raw(f"CN=Schema,{config_dn}", '(lDAPDisplayName=msDS-DelegatedManagedServiceAccount)',
+                                     ['schemaIDGUID'])
+        raw = result[0]['raw_attributes'].get('schemaIDGUID') if result else None
+        return str(uuid.UUID(bytes_le=raw[0])) if raw else None
 
     def _ou_principals(self, sd_raw: bytes, dmsa_guid: str) -> Set[str]:
         """SIDs that can create a dMSA in this OU, or can grant themselves that right."""
@@ -71,15 +71,11 @@ class BadSuccessorChecker:
                 self.logger.success("[+] No dMSA class in the schema (no Windows Server 2025 schema) - BadSuccessor not applicable")
                 return
 
-            dcs = self.ldap.query(self.base_dn,
-                                  '(&(objectClass=computer)(userAccountControl:1.2.840.113556.1.4.803:=8192))',
-                                  ['sAMAccountName', 'operatingSystem'])
+            dcs = get_domain_controllers(self.ldap, ['sAMAccountName', 'operatingSystem'])
             dc2025 = [d.get('sAMAccountName', '') for d in dcs if '2025' in (d.get('operatingSystem') or '')]
 
-            entries = [e for e in self.ldap.connection.extend.standard.paged_search(
-                search_base=self.base_dn, search_filter='(objectClass=organizationalUnit)',
-                attributes=['distinguishedName', 'nTSecurityDescriptor'], controls=SD_FLAGS_OWNER_GROUP_DACL,
-                paged_size=500, generator=False) if e.get('type') == 'searchResEntry']
+            entries = self.ldap.query_raw(self.base_dn, '(objectClass=organizationalUnit)',
+                                          ['distinguishedName', 'nTSecurityDescriptor'], controls=SD_FLAGS_OWNER_GROUP_DACL)
 
             by_principal: Dict[str, List[str]] = {}
             unreadable = 0

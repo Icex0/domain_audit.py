@@ -219,9 +219,8 @@ class SMBChecker:
         Falls back to data/list_domainadmins.txt from the enumeration phase.
         """
         try:
-            from ..enumeration import ADEnumerator
-            enumerator = ADEnumerator(self.ldap, self.output_paths)
-            admins = enumerator.get_privileged_user_members(self.ldap.get_domain_sid(), 512)
+            from ...utils.admins import AdminResolver, DOMAIN_ADMINS_RID
+            admins = AdminResolver(self.ldap).admin_user_names(DOMAIN_ADMINS_RID)
             if admins is not None:
                 return [a.lower() for a in admins]
         except Exception as e:

@@ -11,12 +11,12 @@ from impacket.krb5.asn1 import TGS_REP, AS_REQ, seq_set, seq_set_iter, AS_REP, K
 from impacket.krb5.kerberosv5 import sendReceive, KerberosError
 from pyasn1.codec.der import decoder, encoder
 from pyasn1.type.univ import noValue
-import socket
 import random
 
 from ...utils.logger import get_logger
 from ...utils.ldap import LDAPConnection
 from ...utils.output import write_csv, write_lines
+from ...utils.admins import AdminResolver
 
 
 class RoastingChecker:
@@ -61,14 +61,9 @@ class RoastingChecker:
         self.logger.info("---Checking kerberoastable privileged users---")
         
         try:
-            from ldap3.utils.conv import escape_filter_chars
-            domain_sid = self.ldap.get_domain_sid()
-            chain = []
-            for sid in ('S-1-5-32-544', f'{domain_sid}-512', f'{domain_sid}-519'):
-                group = self.ldap.query(self.base_dn, f'(objectSid={sid})', ['distinguishedName'])
-                if group and group[0].get('distinguishedName'):
-                    chain.append(f"(memberOf:1.2.840.113556.1.4.1941:={escape_filter_chars(group[0]['distinguishedName'])})")
-            privileged = f"(|(adminCount=1)(primaryGroupID=512){''.join(chain)})"
+            admins = AdminResolver(self.ldap)
+            nested = admins.member_filter(admins.admin_group_sids())
+            privileged = f"(|(adminCount=1)(primaryGroupID=512)(primaryGroupID=519){nested})"
             users = self.ldap.query(
                 search_base=self.base_dn,
                 search_filter=('(&(objectCategory=person)(objectClass=user)(servicePrincipalName=*)'

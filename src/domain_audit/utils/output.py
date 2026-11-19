@@ -1,6 +1,5 @@
 """Output directory management utilities."""
 
-import os
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Optional

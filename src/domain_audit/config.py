@@ -1,8 +1,5 @@
 """Core configuration and constants for domain_audit."""
 
-from dataclasses import dataclass
-from typing import Optional, List
-from pathlib import Path
 
 # Domain functional levels mapping
 # Note: Windows Server 2019 and 2022 use the same functional level as 2016 (level 7)

@@ -1,11 +1,11 @@
 """User attribute security checks."""
 
-from typing import Dict, List
+from typing import Dict
 from pathlib import Path
 
 from ...utils.logger import get_logger
 from ...utils.ldap import LDAPConnection
-from ...utils.output import write_csv, write_lines
+from ...utils.output import write_lines
 
 
 class UserAttrsChecker:

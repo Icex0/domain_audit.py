@@ -1,16 +1,18 @@
-"""NTLM security checks - NTLMv1 support and NTLM restriction policies."""
+"""NTLM security checks: NTLMv1 support, NTLM restrictions and LM hash storage.
 
-import io
-import struct
-from typing import Dict, List, Optional
+All settings are read from the GPOs in SYSVOL (Registry.pol and the Security
+Options in GptTmpl.inf [Registry Values]) via the shared utils.sysvol client.
+"""
+
 from pathlib import Path
+from typing import Dict, List, Optional
 
 from ...utils.logger import get_logger
 from ...utils.ldap import LDAPConnection
-from ...utils.output import write_file, write_lines
-from ...utils.registry_pol import parse_pol_file
-from ...utils.gpttmpl import parse_gpttmpl_inf
-from ...utils.dc import select_reachable_dc
+from ...utils.output import write_file
+from ...utils.dc import get_domain_controllers
+from ...utils.sysvol import SysvolClient, has_credentials
+from ...utils.gpo_scope import GPOScope
 
 
 # LmCompatibilityLevel values and their meanings
@@ -23,25 +25,67 @@ LM_COMPATIBILITY_LEVELS = {
     5: "Send NTLMv2 response only, refuse LM & NTLM",
 }
 
-# Registry keys for NTLM settings
-NTLM_REGISTRY_KEYS = {
-    # LmCompatibilityLevel - controls NTLMv1 vs NTLMv2
-    'LmCompatibilityLevel': r'SYSTEM\CurrentControlSet\Control\Lsa',
-    # Restrict NTLM in domain
-    'RestrictNTLMInDomain': r'SYSTEM\CurrentControlSet\Control\Lsa\MSV1_0',
-    # Audit NTLM in domain
-    'AuditNTLMInDomain': r'SYSTEM\CurrentControlSet\Control\Lsa\MSV1_0',
-    # Restrict sending NTLM traffic
-    'RestrictSendingNTLMTraffic': r'SYSTEM\CurrentControlSet\Control\Lsa\MSV1_0',
+# Registry value name (lowercase) -> setting key. Value names are unique, so the
+# same mapping serves Registry.pol entries and GptTmpl.inf [Registry Values].
+NTLM_VALUES = {
+    'lmcompatibilitylevel': 'lm_compatibility_level',   # Lsa
+    'nolmhash': 'no_lm_hash',                           # Lsa
+    'restrictntlmindomain': 'restrict_ntlm_domain',     # Netlogon\Parameters (0/1/3/5/7)
+    'auditntlmindomain': 'audit_ntlm_domain',           # Netlogon\Parameters (0/1/3/5/7)
+    'restrictsendingntlmtraffic': 'restrict_sending',   # Lsa\MSV1_0 (0/1/2)
+    'restrictreceivingntlmtraffic': 'restrict_receiving',  # Lsa\MSV1_0 (0/1/2)
+    'auditreceivingntlmtraffic': 'audit_receiving',     # Lsa\MSV1_0 (0/1/2)
 }
+
+RESTRICT_NTLM_DOMAIN = {0: "Disabled (allow all)", 1: "Deny for domain accounts to domain servers",
+                        3: "Deny for domain accounts", 5: "Deny for domain servers", 7: "Deny all"}
+AUDIT_NTLM_DOMAIN = {0: "Disabled", 1: "Enable for domain accounts to domain servers",
+                     3: "Enable for domain accounts", 5: "Enable for domain servers", 7: "Enable all"}
+RESTRICT_SENDING = {0: "Allow all", 1: "Audit all (no blocking)", 2: "Deny all"}
+RESTRICT_RECEIVING = {0: "Allow all", 1: "Deny domain accounts", 2: "Deny all"}
+AUDIT_RECEIVING = {0: "Disabled", 1: "Enable auditing for domain accounts", 2: "Enable auditing for all accounts"}
+
+
+def gpo_dword_settings(sysvol: SysvolClient, guids: List[str], value_names: Dict[str, str],
+                       key_contains: Optional[str] = None) -> Dict[str, Dict[str, int]]:
+    """{GPO GUID upper: {setting: DWORD value}} from Registry.pol and GptTmpl.inf.
+
+    value_names maps lowercase registry value names to setting keys. Registry.pol
+    values override GptTmpl.inf values of the same GPO. key_contains optionally
+    restricts Registry.pol entries to keys containing this (lowercase) text.
+    """
+    import struct
+    result: Dict[str, Dict[str, int]] = {}
+    for guid in guids:
+        settings: Dict[str, int] = {}
+        registry_values = sysvol.gpttmpl(guid).get('Registry Values', {})
+        for reg_path, raw in registry_values.items():
+            name = reg_path.rsplit('\\', 1)[-1].lower()
+            if name not in value_names or (key_contains and key_contains not in reg_path.lower()):
+                continue
+            parts = (raw or '').split(',')
+            if len(parts) >= 2 and parts[0].strip() == '4':   # REG_DWORD
+                try:
+                    settings[value_names[name]] = int(parts[1].strip())
+                except ValueError:
+                    pass  # malformed value - ignore this setting
+        for key, value_name, reg_type, _size, data in sysvol.registry_pol(guid):
+            name = value_name.lower()
+            if name not in value_names or (key_contains and key_contains not in key.lower()):
+                continue
+            if reg_type == 4 and len(data) >= 4:  # REG_DWORD
+                settings[value_names[name]] = struct.unpack('<I', data[:4])[0]
+        if settings:
+            result[guid.upper()] = settings
+    return result
 
 
 class NTLMChecker:
     """Check NTLM security settings including NTLMv1 support and NTLM restrictions."""
-    
+
     def __init__(self, ldap_conn: LDAPConnection, output_paths: Dict[str, Path],
                  server: str = None, username: str = None, password: str = None,
-                 domain: str = None):
+                 domain: str = None, hashes: str = None):
         self.ldap = ldap_conn
         self.output_paths = output_paths
         self.logger = get_logger()
@@ -49,109 +93,74 @@ class NTLMChecker:
         self.server = server or ldap_conn.config.server
         self.username = username
         self.password = password
+        self.hashes = hashes
         self.domain = domain or ldap_conn.config.domain
-    
+        self._settings = None
+        self._scope = None
+
     def check_ntlm(self):
         """Run all NTLM-related security checks."""
         self._check_ntlmv1_support()
         self._check_ntlm_restrictions()
         self._check_lm_hash_storage()
-        self._check_llmnr()
-    
+
+    # ---------- data ----------
+
+    @property
+    def scope(self) -> GPOScope:
+        if self._scope is None:
+            self._scope = GPOScope(self.ldap, self.logger)
+        return self._scope
+
+    def _gpo_settings(self) -> Dict[str, Dict[str, int]]:
+        """NTLM settings per linked GPO (cached for the three checks)."""
+        if self._settings is None:
+            sysvol = SysvolClient.shared(self.ldap, self.domain, self.username, self.password, self.hashes, self.logger)
+            linked = self.scope.linked_gpo_guids()
+            guids = [g for g in sysvol.gpo_folders() if not linked or g.upper() in linked]
+            self._settings = gpo_dword_settings(sysvol, guids, NTLM_VALUES)
+        return self._settings
+
+    def _gpo_name(self, guid: str) -> str:
+        self.scope.load()
+        info = self.scope.gpos.get(guid.upper())
+        return info.name if info else guid
+
+    def _requirements_met(self, label: str) -> bool:
+        if not has_credentials(self.username, self.password, self.hashes):
+            self.logger.warning(f"[!] {label} requires SMB credentials")
+            return False
+        return True
+
+    # ---------- NTLMv1 ----------
+
     def _check_ntlmv1_support(self):
-        """Check if NTLMv1 is supported on Domain Controllers.
-        
-        NTLMv1 is vulnerable to:
-        - Downgrade attacks (forcing NTLMv1 instead of NTLMv2)
-        - Relay attacks with easier hash cracking
-        
-        LmCompatibilityLevel values 0, 1, or 2 indicate NTLMv1 is supported.
-        Recommended: 3 or higher (NTLMv2 only)
+        """Check LmCompatibilityLevel set via GPO.
+
+        Levels 0-2 make machines send NTLMv1; DCs only refuse NTLMv1 at level 5
+        (levels 3 and 4 still accept it).
         """
         self.logger.info("---Checking for NTLMv1 support on Domain Controllers---")
-        
-        if not self.username or not self.password:
-            self.logger.warning("[!] NTLMv1 check requires SMB credentials")
+        if not self._requirements_met("NTLMv1 check"):
             return
-        
+
         try:
-            from impacket.smbconnection import SMBConnection, SessionError
-        except ImportError:
-            self.logger.error("[-] impacket not available for SYSVOL access")
-            return
-        
-        try:
-            # Get domain controllers with OS information
-            dcs = self.ldap.query(
-                search_base=self.base_dn,
-                search_filter='(&(objectClass=computer)(userAccountControl:1.2.840.113556.1.4.803:=8192))',
-                attributes=['dNSHostName', 'name', 'operatingSystem']
-            )
-            
+            dcs = get_domain_controllers(self.ldap, ['dNSHostName', 'name', 'operatingSystem'])
             if not dcs:
                 self.logger.warning("[!] No domain controllers found")
                 return
 
-            dc_hostname = select_reachable_dc(dcs, fallback=self.server, logger=self.logger)
+            gpo_settings = [
+                {'gpo_name': self._gpo_name(guid), 'lm_level': cfg['lm_compatibility_level'],
+                 'description': LM_COMPATIBILITY_LEVELS.get(cfg['lm_compatibility_level'],
+                                                            f"Unknown ({cfg['lm_compatibility_level']})")}
+                for guid, cfg in self._gpo_settings().items() if 'lm_compatibility_level' in cfg
+            ]
+            ntlmv1_findings = [f"{s['gpo_name']}: LmCompatibilityLevel={s['lm_level']} ({s['description']})"
+                               for s in gpo_settings if s['lm_level'] <= 2]
 
-            # Determine default LmCompatibilityLevel based on DC OS versions
-            default_vulnerable = self._check_dc_os_defaults(dcs)
-            
-            # Connect to SYSVOL
-            conn = SMBConnection(dc_hostname, dc_hostname)
-            conn.login(self.username, self.password, self.domain)
-            
-            # Get all GPOs that might apply to DCs
-            # We check the Default Domain Controllers Policy and other GPOs
-            ntlmv1_findings = []
-            gpo_settings = []
-            
-            # Check all GPOs for LmCompatibilityLevel settings
-            # First check Registry.pol (Administrative Template / GPO Preferences)
-            gpo_policies = self._get_all_gpo_policies(conn)
-            
-            # Also check GptTmpl.inf (Security Options - standard GPO UI)
-            # LmCompatibilityLevel is a Security Option stored in GptTmpl.inf
-            # under [Registry Values] as MACHINE\...\Lsa\LmCompatibilityLevel=4,X
-            gpttmpl_policies = self._get_ntlm_settings_from_gpttmpl(conn)
-            seen_gpo_guids = set()
-            
-            for gpo_name, gpo_guid, lm_level in gpo_policies:
-                if lm_level is not None:
-                    seen_gpo_guids.add(gpo_guid.upper())
-                    level_desc = LM_COMPATIBILITY_LEVELS.get(lm_level, f"Unknown ({lm_level})")
-                    gpo_settings.append({
-                        'gpo_name': gpo_name,
-                        'gpo_guid': gpo_guid,
-                        'lm_level': lm_level,
-                        'description': level_desc
-                    })
-                    
-                    # LmCompatibilityLevel 0, 1, or 2 means NTLMv1 is supported
-                    if lm_level <= 2:
-                        ntlmv1_findings.append(f"{gpo_name}: LmCompatibilityLevel={lm_level} ({level_desc})")
-            
-            # Merge GptTmpl.inf results (only add if not already found in Registry.pol)
-            for gpo_name, gpo_guid, settings in gpttmpl_policies:
-                if gpo_guid.upper() in seen_gpo_guids:
-                    continue
-                lm_level = settings.get('lm_compatibility_level')
-                if lm_level is not None:
-                    level_desc = LM_COMPATIBILITY_LEVELS.get(lm_level, f"Unknown ({lm_level})")
-                    gpo_settings.append({
-                        'gpo_name': gpo_name,
-                        'gpo_guid': gpo_guid,
-                        'lm_level': lm_level,
-                        'description': level_desc
-                    })
-                    if lm_level <= 2:
-                        ntlmv1_findings.append(f"{gpo_name}: LmCompatibilityLevel={lm_level} ({level_desc})")
-            
-            conn.logoff()
-            
             if ntlmv1_findings:
                 self.logger.finding(f"NTLMv1 supported in {len(ntlmv1_findings)} GPO(s) - vulnerable to downgrade/relay attacks")
-                
                 output_lines = [
                     "NTLMv1 Support Detected",
                     "=" * 50,
@@ -167,12 +176,8 @@ class NTLMChecker:
                     "  5 = Send NTLMv2 response only, refuse LM & NTLM (most secure)",
                     "",
                     "Affected GPOs:",
-                ]
-                output_lines.extend([f"  - {f}" for f in ntlmv1_findings])
-                
-                write_file('\n'.join(output_lines),
-                          self.output_paths['findings'] / 'ntlmv1_supported.txt',
-                          self.logger)
+                ] + [f"  - {f}" for f in ntlmv1_findings]
+                write_file('\n'.join(output_lines), self.output_paths['findings'] / 'ntlmv1_supported.txt', self.logger)
             elif gpo_settings:
                 # All settings are >= 3, so no machine *sends* NTLMv1. Only level 5
                 # makes a DC *refuse* NTLMv1 (levels 3 and 4 still accept it).
@@ -185,229 +190,143 @@ class NTLMChecker:
                     )
                 else:
                     self.logger.success("[+] NTLMv1 is refused (LmCompatibilityLevel 5 in all GPOs)")
-
                 output_lines = ["LmCompatibilityLevel Settings", "",
                                 "Levels 3-5 only send NTLMv2; only level 5 makes a DC refuse NTLMv1.", ""]
-                for setting in gpo_settings:
-                    output_lines.append(f"{setting['gpo_name']}: Level {setting['lm_level']} - {setting['description']}")
-
-                write_file('\n'.join(output_lines),
-                          self.output_paths['checks'] / 'ntlmv1_settings.txt',
-                          self.logger)
+                output_lines += [f"{s['gpo_name']}: Level {s['lm_level']} - {s['description']}" for s in gpo_settings]
+                write_file('\n'.join(output_lines), self.output_paths['checks'] / 'ntlmv1_settings.txt', self.logger)
             else:
-                # No explicit GPO settings found - check if OS defaults are vulnerable
-                if default_vulnerable:
-                    self.logger.warning("[!] No LmCompatibilityLevel GPO found - DCs on legacy OS may use vulnerable defaults unless set via local GPO/registry/MDM (verify on host)")
-                    
-                    output_lines = [
-                        "NTLMv1 Support (OS Default)",
-                        "=" * 50,
-                        "",
-                        "No LmCompatibilityLevel GPO setting found.",
-                        "",
-                        "RISK: Domain Controllers are running legacy operating systems with vulnerable defaults:",
-                    ]
-                    for dc_name, os_name, default_level in default_vulnerable:
-                        output_lines.append(f"  - {dc_name}: {os_name} (default level {default_level})")
-                    
-                    output_lines.extend([
-                        "",
-                        "These OS defaults allow NTLMv1:",
-                        "  - Server 2000/XP: Level 1 (NTLMv1)",
-                        "  - Server 2003: Level 2 (NTLMv1 with v2 session security)",
-                        "",
-                        "RECOMMENDATION: Set LmCompatibilityLevel to 3+ via GPO",
-                        "Verify by running Responder and coerce the DC to check actual behavior"
-                    ])
-                    
-                    write_file('\n'.join(output_lines),
-                              self.output_paths['findings'] / 'ntlmv1_supported.txt',
-                              self.logger)
-                else:
-                    self.logger.warning("[!] No LmCompatibilityLevel GPO found - OS defaults apply")
-                    
-                    # List actual DC OS versions for clarity
-                    dc_os_list = []
-                    for dc in dcs:
-                        dc_name = dc.get('name', dc.get('dNSHostName', 'Unknown'))
-                        os_name = dc.get('operatingSystem', 'Unknown')
-                        dc_os_list.append(f"  - {dc_name}: {os_name}")
-                    
-                    self.logger.info("[*] DCs use the OS default level 3: they only send NTLMv2, but still accept NTLMv1 (level 5 refuses it)")
-
-                    output_lines = [
-                        "No LmCompatibilityLevel GPO setting found.",
-                        "",
-                        "Domain Controllers (OS default level 3):"
-                    ]
-                    output_lines.extend(dc_os_list)
-                    output_lines.extend([
-                        "",
-                        "OS defaults:",
-                        "  - Server 2008 and newer: Level 3 (sends NTLMv2 only, still accepts NTLMv1 - set 5 to refuse it)",
-                        "  - Server 2003: Level 2 (NTLMv1 with v2 session) - Vulnerable",
-                        "  - Server 2000/XP: Level 1 (NTLMv1) - Vulnerable",
-                        "",
-                        "Verify by running Responder and coerce the DC to check if LmCompatibilityLevel",
-                        "is set at the local registry level only instead of GPO"
-                    ])
-                    
-                    write_file('\n'.join(output_lines),
-                              self.output_paths['checks'] / 'ntlmv1_settings.txt',
-                              self.logger
-                    )
-                
+                self._report_os_defaults(dcs)
         except Exception as e:
             self.logger.error(f"[-] Error checking NTLMv1 support: {e}")
-    
+
+    def _report_os_defaults(self, dcs: List[Dict]):
+        """No GPO sets LmCompatibilityLevel: report the DCs' OS defaults."""
+        default_vulnerable = self._check_dc_os_defaults(dcs)
+        if default_vulnerable:
+            self.logger.warning("[!] No LmCompatibilityLevel GPO found - DCs on legacy OS may use vulnerable defaults unless set via local GPO/registry/MDM (verify on host)")
+            output_lines = [
+                "NTLMv1 Support (OS Default)",
+                "=" * 50,
+                "",
+                "No LmCompatibilityLevel GPO setting found.",
+                "",
+                "RISK: Domain Controllers are running legacy operating systems with vulnerable defaults:",
+            ] + [f"  - {dc_name}: {os_name} (default level {level})" for dc_name, os_name, level in default_vulnerable] + [
+                "",
+                "These OS defaults allow NTLMv1:",
+                "  - Server 2000/XP: Level 1 (NTLMv1)",
+                "  - Server 2003: Level 2 (NTLMv1 with v2 session security)",
+                "",
+                "RECOMMENDATION: Set LmCompatibilityLevel to 3+ via GPO",
+                "Verify by running Responder and coerce the DC to check actual behavior"
+            ]
+            write_file('\n'.join(output_lines), self.output_paths['findings'] / 'ntlmv1_supported.txt', self.logger)
+            return
+
+        self.logger.warning("[!] No LmCompatibilityLevel GPO found - OS defaults apply")
+        self.logger.info("[*] DCs use the OS default level 3: they only send NTLMv2, but still accept NTLMv1 (level 5 refuses it)")
+        output_lines = ["No LmCompatibilityLevel GPO setting found.", "", "Domain Controllers (OS default level 3):"]
+        output_lines += [f"  - {dc.get('name', dc.get('dNSHostName', 'Unknown'))}: {dc.get('operatingSystem', 'Unknown')}"
+                         for dc in dcs]
+        output_lines += [
+            "",
+            "OS defaults:",
+            "  - Server 2008 and newer: Level 3 (sends NTLMv2 only, still accepts NTLMv1 - set 5 to refuse it)",
+            "  - Server 2003: Level 2 (NTLMv1 with v2 session) - Vulnerable",
+            "  - Server 2000/XP: Level 1 (NTLMv1) - Vulnerable",
+            "",
+            "Verify by running Responder and coerce the DC to check if LmCompatibilityLevel",
+            "is set at the local registry level only instead of GPO"
+        ]
+        write_file('\n'.join(output_lines), self.output_paths['checks'] / 'ntlmv1_settings.txt', self.logger)
+
+    @staticmethod
+    def _check_dc_os_defaults(dcs: List[Dict]) -> List[tuple]:
+        """DCs on legacy OS with vulnerable LmCompatibilityLevel defaults: (name, os, level)."""
+        vulnerable = []
+        for dc in dcs:
+            os_name = dc.get('operatingSystem') or ''
+            os_lower = os_name.lower()
+            if '2000' in os_lower or 'windows xp' in os_lower:
+                level = 1
+            elif '2003' in os_lower:
+                level = 2
+            else:
+                continue  # Vista / 2008 and newer default to level 3
+            vulnerable.append((dc.get('name', dc.get('dNSHostName', 'Unknown')), os_name, level))
+        return vulnerable
+
+    # ---------- NTLM restrictions ----------
+
     def _check_ntlm_restrictions(self):
-        """Check if NTLM authentication is restricted in the domain.
-        
-        Checks three separate controls:
-        - RestrictNTLMInDomain (DC): Controls pass-through authentication
-        - RestrictSendingNTLMTraffic (Clients): Outgoing NTLM to remote servers
-        - RestrictReceivingNTLMTraffic (Servers): Incoming NTLM authentication
-        
-        Ideally NTLM should be disabled and only Kerberos used, but this
-        is rarely the case in real environments.
+        """Check whether NTLM authentication is restricted in the domain.
+
+        - RestrictNTLMInDomain (DC): any non-zero value restricts
+        - RestrictSendingNTLMTraffic (clients): 2 = deny (1 is audit only)
+        - RestrictReceivingNTLMTraffic (servers): 1 or 2 deny
         """
         self.logger.info("---Checking NTLM restriction policies---")
-        
-        if not self.username or not self.password:
-            self.logger.warning("[!] NTLM restriction check requires SMB credentials")
+        if not self._requirements_met("NTLM restriction check"):
             return
-        
+
         try:
-            from impacket.smbconnection import SMBConnection
-        except ImportError:
-            self.logger.error("[-] impacket not available for SYSVOL access")
-            return
-        
-        try:
-            # Get a domain controller
-            dcs = self.ldap.query(
-                search_base=self.base_dn,
-                search_filter='(&(objectClass=computer)(userAccountControl:1.2.840.113556.1.4.803:=8192))',
-                attributes=['dNSHostName']
-            )
-            
-            if not dcs:
-                dc_hostname = self.server
-            else:
-                dc_hostname = select_reachable_dc(dcs, fallback=self.server, logger=self.logger)
-            
-            # Connect to SYSVOL
-            conn = SMBConnection(dc_hostname, dc_hostname)
-            conn.login(self.username, self.password, self.domain)
-            
-            # Check all GPOs for NTLM restriction settings
-            # First check Registry.pol (Administrative Template / GPO Preferences)
-            ntlm_restrictions = self._get_ntlm_restrictions(conn)
-            
-            # Also check GptTmpl.inf (Security Options - standard GPO UI)
-            # RestrictNTLMInDomain, RestrictSendingNTLMTraffic, etc. are Security
-            # Options stored in GptTmpl.inf under [Registry Values]
-            gpttmpl_policies = self._get_ntlm_settings_from_gpttmpl(conn)
-            seen_gpo_guids = set(g.get('gpo_guid', '').upper() for g in ntlm_restrictions)
-            
-            for gpo_name, gpo_guid, settings in gpttmpl_policies:
-                if gpo_guid.upper() in seen_gpo_guids:
-                    continue
-                
-                merged = {}
-                if settings.get('restrict_ntlm_domain') is not None:
-                    merged['restrict_ntlm_domain'] = settings['restrict_ntlm_domain']
-                    if settings['restrict_ntlm_domain'] > 0:
-                        merged['restricted'] = True
-                if settings.get('restrict_sending') is not None:
-                    merged['restrict_sending'] = settings['restrict_sending']
-                    if settings['restrict_sending'] >= 2:
-                        merged['restricted'] = True
-                if settings.get('restrict_receiving') is not None:
-                    merged['restrict_receiving'] = settings['restrict_receiving']
-                    if settings['restrict_receiving'] >= 1:
-                        merged['restricted'] = True
-                if settings.get('audit_ntlm_domain') is not None:
-                    merged['audit_ntlm_domain'] = settings['audit_ntlm_domain']
-                if settings.get('audit_receiving') is not None:
-                    merged['audit_receiving'] = settings['audit_receiving']
-                
-                if merged:
-                    merged['gpo_name'] = gpo_name
-                    merged['gpo_guid'] = gpo_guid
-                    ntlm_restrictions.append(merged)
-            
-            conn.logoff()
-            
-            # Check if actual restrictions are enforced (not just auditing)
-            has_restrictions = False
-            if ntlm_restrictions:
-                has_restrictions = any(r.get('restricted', False) for r in ntlm_restrictions)
-            
-            if has_restrictions:
+            keys = ('restrict_ntlm_domain', 'audit_ntlm_domain', 'restrict_sending', 'restrict_receiving', 'audit_receiving')
+            policies = [(guid, {k: v for k, v in cfg.items() if k in keys})
+                        for guid, cfg in self._gpo_settings().items()]
+            policies = [(guid, cfg) for guid, cfg in policies if cfg]
+
+            def restricted(cfg):
+                return (cfg.get('restrict_ntlm_domain', 0) > 0 or cfg.get('restrict_sending', 0) >= 2
+                        or cfg.get('restrict_receiving', 0) >= 1)
+
+            if any(restricted(cfg) for _, cfg in policies):
                 self.logger.success("[+] NTLM restrictions are configured")
-                
                 output_lines = ["NTLM Restriction Policies", "=" * 50, ""]
-                for r in ntlm_restrictions:
-                    output_lines.append(f"GPO: {r['gpo_name']}")
-                    if r.get('restrict_ntlm_domain') is not None:
-                        val = r['restrict_ntlm_domain']
-                        desc = self._get_restrict_ntlm_domain_desc(val)
-                        output_lines.append(f"  RestrictNTLMInDomain (DC): {val} - {desc}")
-                    if r.get('restrict_sending') is not None:
-                        val = r['restrict_sending']
-                        desc = self._get_restrict_sending_desc(val)
-                        output_lines.append(f"  RestrictSendingNTLMTraffic (Clients): {val} - {desc}")
-                    if r.get('restrict_receiving') is not None:
-                        val = r['restrict_receiving']
-                        desc = self._get_restrict_receiving_desc(val)
-                        output_lines.append(f"  RestrictReceivingNTLMTraffic (Servers): {val} - {desc}")
-                    if r.get('audit_ntlm_domain') is not None:
-                        val = r['audit_ntlm_domain']
-                        output_lines.append(f"  AuditNTLMInDomain (DC): {val} - {self._get_audit_ntlm_domain_desc(val)}")
-                    if r.get('audit_receiving') is not None:
-                        val = r['audit_receiving']
-                        output_lines.append(f"  AuditReceivingNTLMTraffic (Servers): {val} - {self._get_audit_receiving_desc(val)}")
+                for guid, cfg in policies:
+                    output_lines.append(f"GPO: {self._gpo_name(guid)}")
+                    for key, label, names in (
+                        ('restrict_ntlm_domain', 'RestrictNTLMInDomain (DC)', RESTRICT_NTLM_DOMAIN),
+                        ('restrict_sending', 'RestrictSendingNTLMTraffic (Clients)', RESTRICT_SENDING),
+                        ('restrict_receiving', 'RestrictReceivingNTLMTraffic (Servers)', RESTRICT_RECEIVING),
+                        ('audit_ntlm_domain', 'AuditNTLMInDomain (DC)', AUDIT_NTLM_DOMAIN),
+                        ('audit_receiving', 'AuditReceivingNTLMTraffic (Servers)', AUDIT_RECEIVING),
+                    ):
+                        if key in cfg:
+                            output_lines.append(f"  {label}: {cfg[key]} - {names.get(cfg[key], f'Unknown ({cfg[key]})')}")
                     output_lines.append("")
-                
-                write_file('\n'.join(output_lines),
-                          self.output_paths['checks'] / 'ntlm_restrictions.txt',
-                          self.logger)
-            else:
-                # No restrictions enforced (either no settings or only audit)
-                if ntlm_restrictions:
-                    self.logger.info("[*] NTLM audit settings found but no restrictions enforced")
-                self.logger.warning("[!] No domain GPO restricts NTLM - may be unrestricted unless set via local GPO/registry/MDM (verify on host)")
-                
-                output_lines = [
-                    "NTLM Not Restricted",
-                    "=" * 50,
-                    "",
-                    "No NTLM restriction policies were found in GPOs.",
-                    "",
-                    "RISK: NTLM authentication is enabled domain-wide, which allows:",
-                    "  - NTLM relay attacks",
-                    "  - Pass-the-hash attacks",
-                    "  - Credential capture and offline cracking",
-                    "",
-                    "RECOMMENDATION: Consider implementing NTLM restrictions:",
-                    "  1. Enable NTLM auditing first to identify dependencies",
-                    "  2. Add exceptions for required services",
-                    "  3. Gradually restrict NTLM traffic",
-                    "",
-                    "Relevant GPO settings:",
-                    "  - Network security: Restrict NTLM: NTLM authentication in this domain",
-                    "  - Network security: Restrict NTLM: Outgoing NTLM traffic to remote servers",
-                    "  - Network security: Restrict NTLM: Audit NTLM authentication in this domain",
-                ]
-                
-                write_file('\n'.join(output_lines),
-                          self.output_paths['findings'] / 'ntlm_not_restricted.txt',
-                          self.logger)
-                
+                write_file('\n'.join(output_lines), self.output_paths['checks'] / 'ntlm_restrictions.txt', self.logger)
+                return
+
+            if policies:
+                self.logger.info("[*] NTLM audit settings found but no restrictions enforced")
+            self.logger.warning("[!] No domain GPO restricts NTLM - may be unrestricted unless set via local GPO/registry/MDM (verify on host)")
+            output_lines = [
+                "NTLM Not Restricted",
+                "=" * 50,
+                "",
+                "No NTLM restriction policies were found in GPOs.",
+                "",
+                "RISK: NTLM authentication is enabled domain-wide, which allows:",
+                "  - NTLM relay attacks",
+                "  - Pass-the-hash attacks",
+                "  - Credential capture and offline cracking",
+                "",
+                "RECOMMENDATION: Consider implementing NTLM restrictions:",
+                "  1. Enable NTLM auditing first to identify dependencies",
+                "  2. Add exceptions for required services",
+                "  3. Gradually restrict NTLM traffic",
+                "",
+                "Relevant GPO settings:",
+                "  - Network security: Restrict NTLM: NTLM authentication in this domain",
+                "  - Network security: Restrict NTLM: Outgoing NTLM traffic to remote servers",
+                "  - Network security: Restrict NTLM: Audit NTLM authentication in this domain",
+            ]
+            write_file('\n'.join(output_lines), self.output_paths['findings'] / 'ntlm_not_restricted.txt', self.logger)
         except Exception as e:
             self.logger.error(f"[-] Error checking NTLM restrictions: {e}")
-    
+
+    # ---------- LM hashes ----------
+
     def _check_lm_hash_storage(self):
         """Check whether a GPO re-enables storing LM hashes (NoLMHash = 0).
 
@@ -418,33 +337,16 @@ class NTLMChecker:
         in the local SAM on other computers. Evaluated per computer with GPO scope.
         """
         self.logger.info("---Checking LM hash storage (NoLMHash)---")
-        
-        if not self.username or not self.password:
-            self.logger.warning("[!] LM hash check requires SMB credentials")
+        if not self._requirements_met("LM hash check"):
             return
-        
+
         try:
-            from impacket.smbconnection import SMBConnection
-            dcs = self.ldap.query(
-                search_base=self.base_dn,
-                search_filter='(&(objectClass=computer)(userAccountControl:1.2.840.113556.1.4.803:=8192))',
-                attributes=['dNSHostName']
-            )
-            dc_hostname = select_reachable_dc(dcs, fallback=self.server, logger=self.logger) if dcs else self.server
-            conn = SMBConnection(dc_hostname, dc_hostname)
-            conn.login(self.username, self.password, self.domain)
-            settings = self._get_ntlm_settings_from_gpttmpl(conn)
-            conn.logoff()
-            
-            values = {guid.upper(): cfg['no_lm_hash'] for _, guid, cfg in settings if 'no_lm_hash' in cfg}
-            names = {guid.upper(): name for name, guid, _ in settings}
-            enabling = [names[g] for g, v in values.items() if v == 0]
+            values = {guid: cfg['no_lm_hash'] for guid, cfg in self._gpo_settings().items() if 'no_lm_hash' in cfg}
+            enabling = [self._gpo_name(g) for g, v in values.items() if v == 0]
             if not enabling:
                 self.logger.success("[+] No GPO enables LM hash storage (NoLMHash is not set to 0)")
                 return
-            
-            from ...utils.gpo_scope import GPOScope
-            scope = GPOScope(self.ldap, self.logger)
+
             computers = self.ldap.query(
                 search_base=self.base_dn,
                 search_filter='(&(objectClass=computer)(!(userAccountControl:1.2.840.113556.1.4.803:=2)))',
@@ -452,14 +354,14 @@ class NTLMChecker:
             )
             affected, unclear = [], []
             for computer in computers:
-                result = scope.effective_value(computer, values)
+                result = self.scope.effective_value(computer, values)
                 name = computer.get('sAMAccountName', computer['distinguishedName'])
                 if result.status == 'configured' and result.value == 0:
                     dc_note = ' (DC - LM hashes stored in Active Directory)' if int(computer.get('userAccountControl') or 0) & 0x2000 else ''
                     affected.append(f"{name}{dc_note}")
                 elif result.status in ('conflict', 'uncertain'):
                     unclear.append(f"{name}: {result.status} - {result.reason}")
-            
+
             if affected:
                 self.logger.finding(f"LM hashes are stored on {len(affected)} computers (NoLMHash=0 via GPO: {', '.join(enabling)})")
                 write_file('\n'.join([f"GPOs setting NoLMHash=0: {', '.join(enabling)}", "",
@@ -472,635 +374,3 @@ class NTLMChecker:
                 write_file('\n'.join(unclear), self.output_paths['checks'] / 'lm_hash_storage_verify.txt', self.logger)
         except Exception as e:
             self.logger.error(f"[-] Error checking LM hash storage: {e}")
-    
-    def _check_llmnr(self):
-        """Check if LLMNR is disabled via GPO.
-        
-        LLMNR (Link-Local Multicast Name Resolution) is commonly exploited for
-        credential capture using tools like Responder.
-        
-        GPO setting:
-        - SOFTWARE\\Policies\\Microsoft\\Windows NT\\DNSClient\\EnableMulticast (0=disabled)
-        
-        Note: NBT-NS (NetBIOS Name Service) is another poisoning vector but cannot
-        be checked from GPO files - it is controlled per network adapter via DHCP
-        Option 001 or local registry settings.
-        """
-        self.logger.info("---Checking LLMNR configuration---")
-        
-        if not self.username or not self.password:
-            self.logger.warning("[!] LLMNR check requires SMB credentials")
-            return
-        
-        try:
-            from impacket.smbconnection import SMBConnection, SessionError
-        except ImportError:
-            self.logger.error("[-] impacket not available for SYSVOL access")
-            return
-        
-        try:
-            # Get a domain controller
-            dcs = self.ldap.query(
-                search_base=self.base_dn,
-                search_filter='(&(objectClass=computer)(userAccountControl:1.2.840.113556.1.4.803:=8192))',
-                attributes=['dNSHostName']
-            )
-            
-            if not dcs:
-                dc_hostname = self.server
-            else:
-                dc_hostname = select_reachable_dc(dcs, fallback=self.server, logger=self.logger)
-            
-            # Connect to SYSVOL
-            conn = SMBConnection(dc_hostname, dc_hostname)
-            conn.login(self.username, self.password, self.domain)
-            
-            # Check all GPOs for LLMNR settings
-            llmnr_settings = self._get_llmnr_settings(conn)
-            
-            conn.logoff()
-            
-            # Check if LLMNR is disabled
-            disabling_gpos = [(name, guid) for name, guid, value in llmnr_settings if value == 0]
-            
-            if not disabling_gpos:
-                self.logger.warning("[!] No domain GPO disables LLMNR - vulnerable to Responder unless disabled via local GPO/registry/MDM (verify on host)")
-                self._write_llmnr_not_disabled()
-                return
-            
-            # A GPO only disables LLMNR where it's linked, not blocked, not
-            # security/WMI-filtered and not overridden - evaluate per computer.
-            values = {guid.upper(): value for _, guid, value in llmnr_settings}
-            try:
-                from ...utils.gpo_scope import GPOScope
-                scope = GPOScope(self.ldap, self.logger)
-                computers = self.ldap.query(
-                    search_base=self.base_dn,
-                    search_filter='(&(objectClass=computer)(!(userAccountControl:1.2.840.113556.1.4.803:=2)))',
-                    attributes=['sAMAccountName', 'distinguishedName', 'objectSid', 'primaryGroupID', 'userAccountControl']
-                )
-                results = {c.get('sAMAccountName', c['distinguishedName']): scope.effective_value(c, values) for c in computers}
-            except Exception as e:
-                self.logger.warning(f"[!] Could not evaluate where the LLMNR GPOs apply ({e}) - verify GPO scope manually")
-                write_file('\n'.join(["GPOs setting EnableMulticast (scope not evaluated):"] +
-                                      [f"  {n}: EnableMulticast = {v}" for n, _, v in llmnr_settings]),
-                           self.output_paths['checks'] / 'llmnr_gpos.txt', self.logger)
-                return
-            
-            disabled = sorted(n for n, r in results.items() if r.status == 'configured' and r.value == 0)
-            enabled = sorted(n for n, r in results.items()
-                             if r.status == 'not_configured' or (r.status == 'configured' and r.value != 0))
-            unclear = sorted((n, r) for n, r in results.items() if r.status in ('conflict', 'uncertain'))
-            
-            gpo_lines = [f"  {n}: EnableMulticast = {v} ({'disabled' if v == 0 else 'enabled'})" for n, _, v in llmnr_settings]
-            summary = [
-                "LLMNR Configuration (effective per computer)", "=" * 50, "",
-                "GPOs setting EnableMulticast:", *gpo_lines, "",
-                f"LLMNR disabled by GPO: {len(disabled)} computers",
-                f"LLMNR not disabled:    {len(enabled)} computers",
-                f"Needs verification:    {len(unclear)} computers",
-            ]
-            write_file('\n'.join(summary + ["", "Disabled on:"] + [f"  {n}" for n in disabled]),
-                       self.output_paths['checks'] / 'llmnr_disabled.txt', self.logger)
-            
-            if enabled:
-                self.logger.finding(f"LLMNR is not disabled by GPO on {len(enabled)} of {len(results)} enabled computers")
-                write_file('\n'.join(summary + ["", "LLMNR not disabled on (GPO not linked/applied, or EnableMulticast=1):"] +
-                                      [f"  {n}" for n in enabled]),
-                           self.output_paths['findings'] / 'llmnr_enabled.txt', self.logger)
-            else:
-                self.logger.success(f"[+] LLMNR is disabled via GPO on all {len(disabled)} computers that could be evaluated")
-            
-            if unclear:
-                self.logger.warning(f"[!] LLMNR GPO scope couldn't be determined for {len(unclear)} computers - verify manually")
-                write_file('\n'.join([f"{n}: {r.status} - {r.reason} ({', '.join(r.gpos)})" for n, r in unclear]),
-                           self.output_paths['checks'] / 'llmnr_verify.txt', self.logger)
-                
-        except Exception as e:
-            self.logger.error(f"[-] Error checking LLMNR/NBT-NS: {e}")
-    
-    def _write_llmnr_not_disabled(self):
-        """Write the finding for when no GPO disables LLMNR."""
-        output_lines = [
-            "LLMNR Not Disabled",
-            "=" * 50,
-            "",
-            "No GPO found disabling LLMNR (Link-Local Multicast Name Resolution).",
-            "",
-            "RISK: LLMNR is commonly exploited for:",
-            "  - Credential capture using Responder",
-            "  - NTLM relay attacks",
-            "  - Man-in-the-middle attacks on name resolution",
-            "",
-            "GPO to disable LLMNR:",
-            "  Computer Configuration > Administrative Templates > Network > DNS Client",
-            "  > Turn off multicast name resolution = Enabled",
-            "",
-            "Registry: HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows NT\\DNSClient",
-            "  EnableMulticast = 0",
-        ]
-        
-        write_file('\n'.join(output_lines),
-                  self.output_paths['findings'] / 'llmnr_enabled.txt',
-                  self.logger)
-    
-    def _get_llmnr_settings(self, conn) -> List[tuple]:
-        """Get LLMNR settings from linked GPO Registry.pol files.
-        
-        Only processes GPOs that are actually linked to domain/OUs.
-        
-        Returns:
-            List of tuples: (gpo_name, gpo_guid, enable_multicast_value)
-        """
-        from impacket.smbconnection import SessionError
-        
-        results = []
-        
-        # Get set of linked GPO GUIDs first
-        linked_guids = self._get_linked_gpo_guids()
-        
-        try:
-            policies_path = f"{self.domain}/Policies"
-            policies = conn.listPath('SYSVOL', policies_path + '/*')
-        except Exception as e:
-            self.logger.debug(f"Could not list GPO policies: {e}")
-            return results
-        
-        for policy in policies:
-            policy_name = policy.get_longname()
-            if policy_name in ['.', '..']:
-                continue
-            
-            # Only process GPOs that are actually linked
-            if linked_guids and policy_name.upper() not in linked_guids:
-                continue
-            
-            share_path = f"{self.domain}/Policies/{policy_name}/Machine/Registry.pol"
-            
-            try:
-                content_buffer = io.BytesIO()
-                conn.getFile('SYSVOL', share_path, content_buffer.write)
-                content = content_buffer.getvalue()
-                
-                if content:
-                    llmnr_value = self._parse_llmnr_setting(content)
-                    if llmnr_value is not None:
-                        gpo_display_name = self._get_gpo_display_name(policy_name)
-                        results.append((gpo_display_name or policy_name, policy_name, llmnr_value))
-                        
-            except SessionError:
-                pass
-            except Exception as e:
-                self.logger.debug(f"Could not read Registry.pol for {policy_name}: {e}")
-        
-        return results
-    
-    def _parse_llmnr_setting(self, content: bytes) -> Optional[int]:
-        """Parse EnableMulticast (LLMNR) setting from Registry.pol content."""
-        entries = parse_pol_file(content)
-        
-        for key, value_name, reg_type, size, data in entries:
-            # Check for LLMNR setting in DNSClient key
-            if 'DNSClient' in key and value_name.lower() == 'enablemulticast':
-                if reg_type == 4 and len(data) >= 4:  # REG_DWORD
-                    return struct.unpack('<I', data[:4])[0]
-        
-        return None
-    
-    def _get_all_gpo_policies(self, conn) -> List[tuple]:
-        """Get LmCompatibilityLevel from linked GPO Registry.pol files.
-        
-        Only processes GPOs that are actually linked to domain/OUs.
-        
-        Returns:
-            List of tuples: (gpo_name, gpo_guid, lm_level)
-        """
-        from impacket.smbconnection import SessionError
-        
-        results = []
-        
-        # Get set of linked GPO GUIDs first
-        linked_guids = self._get_linked_gpo_guids()
-        
-        try:
-            # List all GPO folders in SYSVOL
-            policies_path = f"{self.domain}/Policies"
-            policies = conn.listPath('SYSVOL', policies_path + '/*')
-        except Exception as e:
-            self.logger.debug(f"Could not list GPO policies: {e}")
-            return results
-        
-        for policy in policies:
-            policy_name = policy.get_longname()
-            if policy_name in ['.', '..']:
-                continue
-            
-            # Only process GPOs that are actually linked
-            if linked_guids and policy_name.upper() not in linked_guids:
-                continue
-            
-            share_path = f"{self.domain}/Policies/{policy_name}/Machine/Registry.pol"
-            
-            try:
-                content_buffer = io.BytesIO()
-                conn.getFile('SYSVOL', share_path, content_buffer.write)
-                content = content_buffer.getvalue()
-                
-                if content:
-                    lm_level = self._parse_lm_compatibility_level(content)
-                    if lm_level is not None:
-                        # Get GPO display name from LDAP
-                        gpo_display_name = self._get_gpo_display_name(policy_name)
-                        results.append((gpo_display_name or policy_name, policy_name, lm_level))
-                        
-            except SessionError:
-                # Registry.pol doesn't exist for this GPO
-                pass
-            except Exception as e:
-                self.logger.debug(f"Could not read Registry.pol for {policy_name}: {e}")
-        
-        return results
-    
-    def _parse_lm_compatibility_level(self, content: bytes) -> Optional[int]:
-        """Parse LmCompatibilityLevel from Registry.pol content."""
-        entries = parse_pol_file(content)
-        
-        for key, value_name, reg_type, size, data in entries:
-            # Check for LmCompatibilityLevel in Lsa key
-            if 'Control\\Lsa' in key and value_name.lower() == 'lmcompatibilitylevel':
-                if reg_type == 4 and len(data) >= 4:  # REG_DWORD
-                    return struct.unpack('<I', data[:4])[0]
-        
-        return None
-    
-    def _get_ntlm_restrictions(self, conn) -> List[Dict]:
-        """Get NTLM restriction settings from linked GPO Registry.pol files.
-        
-        Only processes GPOs that are actually linked to domain/OUs.
-        """
-        from impacket.smbconnection import SessionError
-        
-        results = []
-        
-        # Get set of linked GPO GUIDs first
-        linked_guids = self._get_linked_gpo_guids()
-        
-        try:
-            policies_path = f"{self.domain}/Policies"
-            policies = conn.listPath('SYSVOL', policies_path + '/*')
-        except Exception as e:
-            self.logger.debug(f"Could not list GPO policies: {e}")
-            return results
-        
-        for policy in policies:
-            policy_name = policy.get_longname()
-            if policy_name in ['.', '..']:
-                continue
-            
-            # Only process GPOs that are actually linked
-            if linked_guids and policy_name.upper() not in linked_guids:
-                continue
-            
-            share_path = f"{self.domain}/Policies/{policy_name}/Machine/Registry.pol"
-            
-            try:
-                content_buffer = io.BytesIO()
-                conn.getFile('SYSVOL', share_path, content_buffer.write)
-                content = content_buffer.getvalue()
-                
-                if content:
-                    ntlm_settings = self._parse_ntlm_restrictions(content)
-                    if ntlm_settings:
-                        gpo_display_name = self._get_gpo_display_name(policy_name)
-                        ntlm_settings['gpo_name'] = gpo_display_name or policy_name
-                        ntlm_settings['gpo_guid'] = policy_name
-                        results.append(ntlm_settings)
-                        
-            except SessionError:
-                pass
-            except Exception as e:
-                self.logger.debug(f"Could not read Registry.pol for {policy_name}: {e}")
-        
-        return results
-    
-    def _parse_ntlm_restrictions(self, content: bytes) -> Optional[Dict]:
-        """Parse NTLM restriction settings from Registry.pol content.
-        
-        Values meaning:
-        - RestrictNTLMInDomain: 0=Disabled, 1-4=Various deny levels (DC only)
-        - RestrictSendingNTLMTraffic: 0=Allow, 1=Audit, 2=Deny (Clients)
-        - RestrictReceivingNTLMTraffic: 0=Allow, 1=Deny domain accounts, 2=Deny all (Servers)
-        """
-        entries = parse_pol_file(content)
-        
-        settings = {}
-        
-        for key, value_name, reg_type, size, data in entries:
-            # Check for NTLM settings in MSV1_0 or Netlogon\Parameters key
-            if 'MSV1_0' not in key and 'Lsa' not in key and 'Netlogon' not in key:
-                continue
-            
-            value_lower = value_name.lower()
-            
-            if value_lower == 'restrictntlmindomain':
-                if reg_type == 4 and len(data) >= 4:
-                    val = struct.unpack('<I', data[:4])[0]
-                    settings['restrict_ntlm_domain'] = val
-                    # 0=Disabled, 1-4=various deny levels (any non-zero is restriction)
-                    if val > 0:
-                        settings['restricted'] = True
-            elif value_lower == 'auditntlmindomain':
-                if reg_type == 4 and len(data) >= 4:
-                    settings['audit_ntlm_domain'] = struct.unpack('<I', data[:4])[0]
-            elif value_lower == 'auditreceivingntlmtraffic':
-                if reg_type == 4 and len(data) >= 4:
-                    settings['audit_receiving'] = struct.unpack('<I', data[:4])[0]
-            elif value_lower == 'restrictsendingntlmtraffic':
-                if reg_type == 4 and len(data) >= 4:
-                    val = struct.unpack('<I', data[:4])[0]
-                    settings['restrict_sending'] = val
-                    # 2=Deny (1=Audit only, doesn't block)
-                    if val >= 2:
-                        settings['restricted'] = True
-            elif value_lower == 'restrictreceivingntlmtraffic':
-                if reg_type == 4 and len(data) >= 4:
-                    val = struct.unpack('<I', data[:4])[0]
-                    settings['restrict_receiving'] = val
-                    # 1=Deny domain accounts, 2=Deny all (either is restriction)
-                    if val >= 1:
-                        settings['restricted'] = True
-        
-        return settings if settings else None
-    
-    def _get_gpo_display_name(self, gpo_guid: str) -> Optional[str]:
-        """Get GPO display name from LDAP."""
-        try:
-            results = self.ldap.query(
-                search_base=f"CN=Policies,CN=System,{self.base_dn}",
-                search_filter=f"(cn={gpo_guid})",
-                attributes=['displayName']
-            )
-            if results:
-                return results[0].get('displayName')
-        except Exception:
-            pass
-        return None
-    
-    def _get_linked_gpo_guids(self) -> set:
-        """Get set of GPO GUIDs that are linked to domain, OUs, or sites.
-        
-        Note: "Linked" means the GPO is referenced in gPLink attribute.
-        This does NOT guarantee the GPO is applied - security filtering,
-        WMI filtering, or inheritance blocking may prevent application.
-        
-        Queries gPLink attribute on:
-        - Domain root object
-        - Organizational Units (OUs)
-        - Sites (in Configuration naming context)
-        
-        gPLink format: [LDAP://CN={GUID},CN=Policies,...;OPTIONS]
-        OPTIONS: 0=enabled, 1=disabled, 2=enforced, 3=disabled+enforced
-        
-        Returns:
-            Set of GPO GUIDs (uppercase, with braces) that are linked and enabled.
-        """
-        import re
-        
-        linked_guids = set()
-        
-        # Parse gPLink attribute
-        # Format: [LDAP://CN={GUID},CN=Policies,CN=System,DC=...;OPTIONS][...]
-        gp_link_pattern = re.compile(
-            r'\[LDAP://[Cc][Nn]=(\{[0-9A-Fa-f\-]+\}),[Cc][Nn]=Policies.*?;(\d+)\]',
-            re.IGNORECASE
-        )
-        
-        def extract_linked_guids(results):
-            """Extract linked GPO GUIDs from query results."""
-            for obj in results:
-                gp_link = obj.get('gPLink', '')
-                if not gp_link:
-                    continue
-                
-                for match in gp_link_pattern.finditer(gp_link):
-                    guid = match.group(1).upper()
-                    options = int(match.group(2))
-                    
-                    # Options: 0=enabled, 1=disabled, 2=enforced (enabled), 3=disabled+enforced
-                    # Only add if link is enabled (options 0 or 2)
-                    if options in (0, 2):
-                        linked_guids.add(guid)
-        
-        # Query 1: Domain root and OUs
-        try:
-            results = self.ldap.query(
-                search_base=self.base_dn,
-                search_filter='(|(objectClass=domain)(objectClass=organizationalUnit))',
-                attributes=['gPLink', 'distinguishedName']
-            )
-            if results:
-                extract_linked_guids(results)
-        except Exception as e:
-            self.logger.debug(f"Could not query domain/OU gPLink attributes: {e}")
-        
-        # Query 2: Sites (in Configuration naming context)
-        try:
-            # Get the actual Configuration naming context from RootDSE
-            # This is important for child domains where the Configuration
-            # partition is at the forest root, not the child domain level
-            try:
-                config_dn = self.ldap.get_config_dn()
-            except Exception:
-                # Fallback: construct from base_dn (works for single-domain forests)
-                config_dn = f"CN=Configuration,{self.base_dn}"
-            
-            results = self.ldap.query(
-                search_base=f"CN=Sites,{config_dn}",
-                search_filter='(objectClass=site)',
-                attributes=['gPLink', 'distinguishedName']
-            )
-            if results:
-                extract_linked_guids(results)
-        except Exception as e:
-            self.logger.debug(f"Could not query site gPLink attributes: {e}")
-        
-        return linked_guids
-    
-    def _get_restrict_ntlm_domain_desc(self, value: int) -> str:
-        """Get description for RestrictNTLMInDomain value."""
-        # Netlogon\Parameters\RestrictNTLMInDomain values (security option enum)
-        descriptions = {
-            0: "Disabled (allow all)",
-            1: "Deny for domain accounts to domain servers",
-            3: "Deny for domain accounts",
-            5: "Deny for domain servers",
-            7: "Deny all"
-        }
-        return descriptions.get(value, f"Unknown ({value})")
-    
-    def _get_audit_ntlm_domain_desc(self, value: int) -> str:
-        """Get description for AuditNTLMInDomain value (same encoding as RestrictNTLMInDomain)."""
-        descriptions = {
-            0: "Disabled",
-            1: "Enable for domain accounts to domain servers",
-            3: "Enable for domain accounts",
-            5: "Enable for domain servers",
-            7: "Enable all"
-        }
-        return descriptions.get(value, f"Unknown ({value})")
-    
-    def _get_audit_receiving_desc(self, value: int) -> str:
-        """Get description for AuditReceivingNTLMTraffic value."""
-        descriptions = {
-            0: "Disabled",
-            1: "Enable auditing for domain accounts",
-            2: "Enable auditing for all accounts"
-        }
-        return descriptions.get(value, f"Unknown ({value})")
-    
-    def _get_restrict_sending_desc(self, value: int) -> str:
-        """Get description for RestrictSendingNTLMTraffic value."""
-        descriptions = {
-            0: "Allow all",
-            1: "Audit all (no blocking)",
-            2: "Deny all"
-        }
-        return descriptions.get(value, f"Unknown ({value})")
-    
-    def _get_restrict_receiving_desc(self, value: int) -> str:
-        """Get description for RestrictReceivingNTLMTraffic value."""
-        descriptions = {
-            0: "Allow all",
-            1: "Deny domain accounts",
-            2: "Deny all"
-        }
-        return descriptions.get(value, f"Unknown ({value})")
-    
-    # GptTmpl.inf parsing is handled by utils.gpttmpl.parse_gpttmpl_inf
-    
-    def _get_ntlm_settings_from_gpttmpl(self, conn) -> List[tuple]:
-        """Get NTLM-related settings from GptTmpl.inf files in linked GPOs.
-        
-        Security Options (like LmCompatibilityLevel, RestrictNTLMInDomain, etc.)
-        are stored in GptTmpl.inf under [Registry Values] when configured via
-        the standard Security Options GPO UI.
-        
-        Returns:
-            List of tuples: (gpo_name, gpo_guid, settings_dict)
-            where settings_dict may contain:
-              - lm_compatibility_level: int
-              - restrict_ntlm_domain: int
-              - restrict_sending: int
-              - restrict_receiving: int
-              - audit_ntlm_domain: int
-              - audit_receiving: int
-        """
-        from impacket.smbconnection import SessionError
-        
-        results = []
-        linked_guids = self._get_linked_gpo_guids()
-        
-        try:
-            policies_path = f"{self.domain}/Policies"
-            policies = conn.listPath('SYSVOL', policies_path + '/*')
-        except Exception as e:
-            self.logger.debug(f"Could not list GPO policies: {e}")
-            return results
-        
-        # Registry value keys we're interested in (lowercase for matching)
-        ntlm_keys = {
-            'machine\\system\\currentcontrolset\\control\\lsa\\lmcompatibilitylevel': 'lm_compatibility_level',
-            'machine\\system\\currentcontrolset\\control\\lsa\\nolmhash': 'no_lm_hash',
-            'machine\\system\\currentcontrolset\\services\\netlogon\\parameters\\restrictntlmindomain': 'restrict_ntlm_domain',
-            'machine\\system\\currentcontrolset\\control\\lsa\\msv1_0\\restrictsendingntlmtraffic': 'restrict_sending',
-            'machine\\system\\currentcontrolset\\control\\lsa\\msv1_0\\restrictreceivingntlmtraffic': 'restrict_receiving',
-            'machine\\system\\currentcontrolset\\control\\lsa\\msv1_0\\auditreceivingntlmtraffic': 'audit_receiving',
-            'machine\\system\\currentcontrolset\\services\\netlogon\\parameters\\auditntlmindomain': 'audit_ntlm_domain',
-        }
-        
-        for policy in policies:
-            policy_name = policy.get_longname()
-            if policy_name in ['.', '..']:
-                continue
-            
-            if linked_guids and policy_name.upper() not in linked_guids:
-                continue
-            
-            # Path to GptTmpl.inf
-            inf_path = f"{self.domain}/Policies/{policy_name}/Machine/Microsoft/Windows NT/SecEdit/GptTmpl.inf"
-            
-            try:
-                content_buffer = io.BytesIO()
-                conn.getFile('SYSVOL', inf_path, content_buffer.write)
-                content = content_buffer.getvalue()
-                
-                if not content:
-                    continue
-                
-                parsed = parse_gpttmpl_inf(content)
-                
-                # Look in [Registry Values] section
-                registry_values = parsed.get('Registry Values', {})
-                if not registry_values:
-                    continue
-                
-                settings = {}
-                for reg_key, reg_value in registry_values.items():
-                    # Keys in configparser are lowercased
-                    setting_name = ntlm_keys.get(reg_key)
-                    if setting_name is None:
-                        continue
-                    
-                    # Parse value: format is "Type,Data" e.g. "4,3" (REG_DWORD, value 3)
-                    try:
-                        parts = reg_value.split(',')
-                        if len(parts) >= 2 and parts[0].strip() == '4':  # REG_DWORD
-                            settings[setting_name] = int(parts[1].strip())
-                    except (ValueError, IndexError):
-                        continue
-                
-                if settings:
-                    gpo_display_name = self._get_gpo_display_name(policy_name)
-                    results.append((gpo_display_name or policy_name, policy_name, settings))
-                    
-            except SessionError:
-                # GptTmpl.inf doesn't exist for this GPO
-                pass
-            except Exception as e:
-                self.logger.debug(f"Could not read GptTmpl.inf for {policy_name}: {e}")
-        
-        return results
-    
-    def _check_dc_os_defaults(self, dcs: List[Dict]) -> List[tuple]:
-        """Check if DCs are running legacy OS with vulnerable LmCompatibilityLevel defaults.
-        
-        Returns list of tuples: (dc_name, os_name, default_level) for vulnerable DCs only.
-        """
-        vulnerable_dcs = []
-        
-        for dc in dcs:
-            dc_name = dc.get('name', dc.get('dNSHostName', 'Unknown'))
-            os_name = dc.get('operatingSystem', 'Unknown')
-            
-            # Determine default LmCompatibilityLevel based on OS
-            default_level = None
-            
-            if os_name and os_name != 'Unknown':
-                os_lower = os_name.lower()
-                
-                # Server 2000, XP, 2000 Server - default level 1 (NTLMv1)
-                if any(x in os_lower for x in ['2000', 'windows xp']):
-                    default_level = 1
-                
-                # Server 2003, 2003 R2 - default level 2 (NTLMv1 with v2 session security)
-                elif '2003' in os_lower:
-                    default_level = 2
-                
-                # Vista, 2008 and higher - default level 3 (NTLMv2 only) - secure
-                # No need to add to vulnerable list
-            
-            # Add to vulnerable list if default is 0, 1, or 2
-            if default_level is not None and default_level <= 2:
-                vulnerable_dcs.append((dc_name, os_name, default_level))
-        
-        return vulnerable_dcs if vulnerable_dcs else None

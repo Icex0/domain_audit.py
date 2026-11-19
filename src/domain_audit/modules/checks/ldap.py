@@ -1,32 +1,26 @@
-"""LDAP and SYSVOL security checks.
+"""LDAP security checks: anonymous bind, LDAP signing and LDAPS channel binding
+(the latter via NetExec)."""
 
-Uses netexec to check LDAP signing and channel binding.
-"""
-
-import io
 import subprocess
 import re
-from typing import Dict, List
+from typing import Dict
 from pathlib import Path
 
 import ldap3
 
-from impacket.dcerpc.v5 import transport, rprn
 
 from ...utils.logger import get_logger
 from ...utils.ldap import LDAPConnection
 from ...utils.output import write_lines
-from ...utils.gpp import find_cpasswords, find_autologon
-from ...utils.dc import select_reachable_dc
-from ...config import SYSVOL_PASSWORD_KEYWORDS, NETLOGON_PASSWORD_KEYWORDS
+from ...utils.dc import get_domain_controllers
 
 
 class LDAPChecker:
-    """LDAP signing, channel binding, and SYSVOL checks."""
+    """LDAP anonymous bind, signing and channel binding checks."""
     
     def __init__(self, ldap_conn: LDAPConnection, output_paths: Dict[str, Path],
                  server: str = None, username: str = None, password: str = None,
-                 domain: str = None):
+                 domain: str = None, hashes: str = None):
         self.ldap = ldap_conn
         self.output_paths = output_paths
         self.logger = get_logger()
@@ -34,26 +28,20 @@ class LDAPChecker:
         self.server = server or ldap_conn.config.server
         self.username = username
         self.password = password
+        self.hashes = hashes
         self.domain = domain or ldap_conn.config.domain
     
     def check_ldap(self):
-        """Run all LDAP and SYSVOL checks."""
+        """Run all LDAP checks."""
         self._check_ldap_anonymous_bind()
         self._check_ldap_signing()
-        self._check_sysvol_passwords()
-        self._check_netlogon_passwords()
-        self._check_printspooler_dc()
     
     def _check_ldap_anonymous_bind(self):
         """Check whether each DC allows anonymous (unauthenticated) LDAP binds."""
         self.logger.info("---Checking LDAP anonymous bind---")
 
         try:
-            dcs = self.ldap.query(
-                search_base=self.base_dn,
-                search_filter='(&(objectClass=computer)(userAccountControl:1.2.840.113556.1.4.803:=8192))',
-                attributes=['dNSHostName', 'name']
-            )
+            dcs = get_domain_controllers(self.ldap, ['dNSHostName', 'name'])
         except Exception as e:
             self.logger.error(f"[-] Failed to query domain controllers: {e}")
             dcs = []
@@ -88,6 +76,7 @@ class LDAPChecker:
                     # domain data.  rootDSE is always accessible anonymously
                     # (RFC 4512), so we skip it and test real domain queries.
                     anonymous_access = False
+                    search_errors = []
 
                     # Try to read an actual domain object
                     try:
@@ -101,8 +90,8 @@ class LDAPChecker:
                         # the result code explicitly (0 = success)
                         if conn.result.get('result') == 0 and conn.entries:
                             anonymous_access = True
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        search_errors.append(str(e))
 
                     # Fallback: try enumerating users (single result)
                     if not anonymous_access:
@@ -116,12 +105,14 @@ class LDAPChecker:
                             )
                             if conn.result.get('result') == 0 and conn.entries:
                                 anonymous_access = True
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            search_errors.append(str(e))
 
                     if anonymous_access:
                         self.logger.finding(f"Anonymous LDAP bind allowed on {name} ({hostname})")
                         vulnerable_dcs.append(f"{name} ({hostname}): anonymous LDAP bind allowed")
+                    elif len(search_errors) == 2:
+                        self.logger.warning(f"[!] Could not test anonymous LDAP access on {name}: {search_errors[-1]}")
                     else:
                         self.logger.success(f"[+] Anonymous LDAP bind denied on {name}")
 
@@ -144,11 +135,7 @@ class LDAPChecker:
         
         # Get all domain controllers
         try:
-            dcs = self.ldap.query(
-                search_base=self.base_dn,
-                search_filter='(&(objectClass=computer)(userAccountControl:1.2.840.113556.1.4.803:=8192))',
-                attributes=['dNSHostName', 'name']
-            )
+            dcs = get_domain_controllers(self.ldap, ['dNSHostName', 'name'])
         except Exception as e:
             self.logger.error(f"[-] Failed to query domain controllers: {e}")
             dcs = []
@@ -171,7 +158,8 @@ class LDAPChecker:
             self.logger.info(f"[*] Checking DC: {name} ({hostname})")
             
             try:
-                cmd = ['netexec', 'ldap', hostname, '-u', self.username, '-p', self.password]
+                cmd = ['netexec', 'ldap', hostname, '-u', self.username] + (
+                    ['-H', self.hashes] if self.hashes and not self.password else ['-p', self.password])
                 # Avoid exposing credentials in debug logs.
                 self.logger.debug(f"[*] Running netexec ldap against {hostname}")
                 
@@ -260,310 +248,3 @@ class LDAPChecker:
             write_lines(vulnerable_dcs, findings_path)
         elif completed_checks == len(dcs) and completed_checks > 0:
             findings_path.unlink(missing_ok=True)
-    
-    def _check_sysvol_passwords(self):
-        """Check SYSVOL GPO folders for GPP cpasswords and password keywords.
-
-        Group Policy Preferences XML files sit several levels deep, e.g.
-        Policies/{GUID}/Machine/Preferences/Groups/Groups.xml, so the Policies
-        folder is walked recursively. SYSVOL is replicated between DCs, so one
-        reachable DC is scanned.
-        """
-        self.logger.info("---Checking SYSVOL for passwords---")
-        self.logger.info("[*] This might take a while")
-        
-        try:
-            from impacket.smbconnection import SMBConnection
-        except ImportError:
-            self.logger.error("[-] impacket not available")
-            return
-        
-        try:
-            dcs = self.ldap.query(
-                search_base=self.base_dn,
-                search_filter='(&(objectClass=computer)(userAccountControl:1.2.840.113556.1.4.803:=8192))',
-                attributes=['dNSHostName', 'name']
-            )
-            if not dcs:
-                self.logger.info("[*] No domain controllers found")
-                return
-            hostname = select_reachable_dc(dcs, fallback=self.server, logger=self.logger)
-            
-            conn = SMBConnection(hostname, hostname)
-            conn.login(self.username, self.password, self.domain)
-            
-            gpp_findings = []
-            autologon_findings = []
-            keyword_hits = []
-            xml_count = 0
-            for file_path in self._walk_share(conn, 'SYSVOL', f"{self.domain}/Policies"):
-                if not file_path.lower().endswith('.xml'):
-                    continue
-                xml_count += 1
-                content = self._read_share_file(conn, 'SYSVOL', file_path)
-                if not content:
-                    continue
-                
-                found_credentials = False
-                for entry in find_cpasswords(content):
-                    password = entry['password'] or f"<could not decrypt: {entry['cpassword']}>"
-                    gpp_findings.append(f"{file_path}: user '{entry['user'] or '?'}' password '{password}'")
-                    found_credentials = True
-                if file_path.lower().endswith('registry.xml'):
-                    for entry in find_autologon(content):
-                        user = f"{entry['domain']}\\{entry['user']}" if entry['domain'] else (entry['user'] or '?')
-                        autologon_findings.append(f"{file_path}: autologon user '{user}' password '{entry['password']}'")
-                        found_credentials = True
-                if found_credentials:
-                    continue  # already reported with the actual credentials; skip the keyword hit
-                
-                content_lower = content.lower()
-                for keyword in SYSVOL_PASSWORD_KEYWORDS:
-                    if keyword.encode() in content_lower:
-                        keyword_hits.append(f"Found '{keyword}' in {file_path}")
-                        break
-            
-            conn.logoff()
-            self.logger.info(f"[*] Scanned {xml_count} XML files in SYSVOL of {hostname}")
-            
-            if gpp_findings:
-                self.logger.finding(f"{len(gpp_findings)} Group Policy Preferences passwords (cpassword) found in SYSVOL")
-                write_lines(gpp_findings, self.output_paths['findings'] / 'sysvol_gpp_passwords.txt')
-            else:
-                self.logger.success("[+] No Group Policy Preferences passwords (cpassword) found in SYSVOL")
-            
-            if autologon_findings:
-                self.logger.finding(f"{len(autologon_findings)} cleartext autologon password(s) in Group Policy Preferences (Registry.xml)")
-                write_lines(autologon_findings, self.output_paths['findings'] / 'sysvol_gpp_autologon.txt')
-            else:
-                self.logger.success("[+] No Group Policy Preferences autologon passwords found in SYSVOL")
-            
-            if keyword_hits:
-                self.logger.warning(f"[!] {len(keyword_hits)} SYSVOL XML files contain password keywords - please check manually")
-                write_lines(keyword_hits, self.output_paths['checks'] / 'sysvol_passwords.txt')
-                
-        except Exception as e:
-            self.logger.error(f"[-] Error checking SYSVOL: {e}")
-    
-    def _walk_share(self, conn, share: str, path: str, depth: int = 0, max_depth: int = 12):
-        """Recursively yield file paths below path on an SMB share."""
-        if depth > max_depth:
-            return
-        try:
-            entries = conn.listPath(share, f"{path}/*")
-        except Exception as e:
-            self.logger.debug(f"Error listing {share}/{path}: {e}")
-            return
-        for entry in entries:
-            name = entry.get_longname()
-            if name in ('.', '..'):
-                continue
-            full_path = f"{path}/{name}"
-            if entry.is_directory():
-                yield from self._walk_share(conn, share, full_path, depth + 1, max_depth)
-            else:
-                yield full_path
-    
-    def _read_share_file(self, conn, share: str, path: str, max_size: int = 10 * 1024 * 1024) -> bytes:
-        """Read a file from an SMB share, returning b'' on error or if too large."""
-        buffer = io.BytesIO()
-        try:
-            def write(data):
-                if buffer.tell() + len(data) > max_size:
-                    raise ValueError("file too large")
-                buffer.write(data)
-            conn.getFile(share, path, write)
-            return buffer.getvalue()
-        except Exception as e:
-            self.logger.debug(f"Error reading {share}/{path}: {e}")
-            return b''
-    
-    def _check_netlogon_passwords(self):
-        """Check for passwords in NETLOGON share using impacket."""
-        self.logger.info("---Checking NETLOGON for passwords---")
-        self.logger.info("[*] This might take a while")
-        
-        try:
-            from impacket.smbconnection import SMBConnection
-        except ImportError:
-            self.logger.error("[-] impacket not available")
-            return
-        
-        try:
-            dcs = self.ldap.query(
-                search_base=self.base_dn,
-                search_filter='(&(objectClass=computer)(userAccountControl:1.2.840.113556.1.4.803:=8192))',
-                attributes=['dNSHostName', 'name']
-            )
-            
-            if not dcs:
-                self.logger.info("[*] No domain controllers found")
-                return
-            
-            findings = []
-            
-            for dc in dcs:
-                hostname = dc.get('dNSHostName', '')
-                name = dc.get('name', '')
-                
-                if not hostname:
-                    continue
-                
-                self.logger.info(f"[*] Checking NETLOGON of {name}")
-                
-                try:
-                    conn = SMBConnection(hostname, hostname)
-                    conn.login(self.username, self.password, self.domain)
-                    
-                    # Connect to NETLOGON share
-                    conn.connectTree('NETLOGON')
-                    
-                    # List files recursively and check content
-                    found_password = False
-                    
-                    def scan_share_path(conn, share, path=""):
-                        nonlocal found_password
-                        try:
-                            files = conn.listPath(share, path + "/*" if path else "*")
-                            
-                            for file in files:
-                                fname = file.get_longname()
-                                if fname in ['.', '..']:
-                                    continue
-                                    
-                                full_path = f"{path}/{fname}" if path else fname
-                                
-                                if file.is_directory():
-                                    scan_share_path(conn, share, full_path)
-                                else:
-                                    # Check filename for any keyword
-                                    fname_lower = fname.lower()
-                                    for keyword in NETLOGON_PASSWORD_KEYWORDS:
-                                        if keyword in fname_lower:
-                                            found_password = True
-                                            findings.append(f"{name}: Suspicious filename '{full_path}' (matched '{keyword}')")
-                                            break
-                                    
-                                    # Try to read text files
-                                    if fname.endswith(('.bat', '.cmd', '.ps1', '.vbs', '.txt')):
-                                        try:
-                                            tid = conn.connectTree(share)
-                                            fid = conn.openFile(tid, full_path)
-                                            content = conn.readFile(tid, fid)
-                                            conn.closeFile(tid, fid)
-                                            
-                                            if content:
-                                                content_lower = content.lower()
-                                                for keyword in NETLOGON_PASSWORD_KEYWORDS:
-                                                    if keyword.encode() in content_lower:
-                                                        found_password = True
-                                                        findings.append(f"{name}: Found '{keyword}' in {full_path}")
-                                                        break
-                                                
-                                        except Exception as e:
-                                            self.logger.debug(f"Error reading {full_path}: {e}")
-                        except Exception as e:
-                            self.logger.debug(f"Error listing {path}: {e}")
-                    
-                    scan_share_path(conn, 'NETLOGON')
-                    conn.logoff()
-                    
-                    if found_password:
-                        self.logger.warning(f"[!] Possible passwords found in NETLOGON of {name}")
-                    else:
-                        self.logger.success(f"[+] No obvious passwords in NETLOGON of {name}")
-                        
-                except Exception as e:
-                    self.logger.error(f"[-] Error accessing NETLOGON on {hostname}: {e}")
-            
-            if findings:
-                write_lines(findings,
-                           self.output_paths['checks'] / 'netlogon_passwords.txt')
-                self.logger.warning("[!] Please manually check NETLOGON for passwords")
-                
-        except Exception as e:
-            self.logger.error(f"[-] Error checking NETLOGON: {e}")
-    
-    def _check_printspooler_dc(self):
-        """Check if PrintSpooler service is running on DCs using impacket RPC."""
-        self.logger.info("---Checking PrintSpooler service on DCs---")
-        
-        try:
-            # Get domain controllers
-            dcs = self.ldap.query(
-                search_base=self.base_dn,
-                search_filter='(&(objectClass=computer)(userAccountControl:1.2.840.113556.1.4.803:=8192))',
-                attributes=['dNSHostName', 'name']
-            )
-            
-            if not dcs:
-                self.logger.info("[*] No domain controllers found")
-                return
-            
-            spooler_enabled = []
-            spooler_unknown = []
-
-            for dc in dcs:
-                hostname = dc.get('dNSHostName', '')
-                name = dc.get('name', '')
-
-                if not hostname:
-                    continue
-
-                # Check for MS-RPRN (Print Spooler) using impacket
-                status, detail = self._check_spooler_rpc(hostname)
-                if status is True:
-                    self.logger.finding(f"PrintSpooler enabled on {name}")
-                    spooler_enabled.append(f"{name} ({hostname})")
-                elif status is False:
-                    self.logger.success(f"[+] PrintSpooler disabled on {name}")
-                else:
-                    self.logger.warning(f"[!] PrintSpooler status unknown on {name}: {detail}")
-                    spooler_unknown.append(f"{name} ({hostname}): {detail}")
-
-            if spooler_enabled:
-                write_lines(spooler_enabled,
-                           self.output_paths['findings'] / 'printspooler_domaincontrollers.txt')
-            if spooler_unknown:
-                write_lines(spooler_unknown,
-                           self.output_paths['checks'] / 'printspooler_domaincontrollers_unknown.txt')
-                                           
-        except Exception as e:
-            self.logger.error(f"[-] Error checking PrintSpooler: {e}")
-    
-    def _check_spooler_rpc(self, target: str):
-        """Check if the Print Spooler RPC interface is available on target.
-
-        Returns (status, detail): status is True (running), False (not running:
-        the \\pipe\\spoolss named pipe doesn't exist) or None (unknown, e.g.
-        authentication failure, access denied or timeout).
-        """
-        try:
-            # MS-RPRN UUID (Print System Remote Protocol)
-            MSRPRN_UUID = ('12345678-1234-abcd-ef00-0123456789ab', '1.0')
-            
-            # Try to bind to the MS-RPRN interface
-            string_binding = f'ncacn_np:{target}[\\pipe\\spoolss]'
-            rpc_transport = transport.DCERPCTransportFactory(string_binding)
-            
-            # Set credentials if available
-            if self.username and self.password:
-                rpc_transport.set_credentials(self.username, self.password, self.domain, '', '')
-            
-            rpc_transport.set_connect_timeout(10)
-            
-            dce = rpc_transport.get_dce_rpc()
-            dce.connect()
-            dce.bind(rprn.MSRPC_UUID_RPRN)
-            
-            # If we get here, spooler is running
-            dce.disconnect()
-            return True, ''
-
-        except Exception as e:
-            self.logger.debug(f"Spooler check failed for {target}: {e}")
-            # A stopped spooler removes the spoolss pipe, so opening it fails with
-            # STATUS_OBJECT_NAME_NOT_FOUND. Any other error doesn't tell us the state.
-            if 'STATUS_OBJECT_NAME_NOT_FOUND' in str(e):
-                return False, ''
-            return None, str(e) or type(e).__name__

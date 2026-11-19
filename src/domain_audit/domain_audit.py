@@ -8,9 +8,8 @@ from typing import Annotated, List, Optional
 import typer
 
 from . import __version__
-from .config import DOMAIN_FUNCTIONAL_LEVELS, ADMIN_THRESHOLD_PERCENTAGE
+from .config import ADMIN_THRESHOLD_PERCENTAGE
 from .core.auth import Credentials, ADAuthManager
-from .core.exceptions import DomainAuditError
 from .utils.logger import get_logger, set_verbose
 from .utils.output import create_output_directory, write_lines
 from .utils.ldap import LDAPConnection, LDAPConfig

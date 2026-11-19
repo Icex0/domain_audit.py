@@ -1,12 +1,11 @@
 """Domain trust enumeration and checks."""
 
-import struct
 from typing import Dict, List, Union
 from pathlib import Path
 
 from ...utils.logger import get_logger
 from ...utils.ldap import LDAPConnection
-from ...utils.output import write_csv, write_file
+from ...utils.output import write_csv
 
 
 def convert_sid_to_string(sid_bytes: Union[bytes, str]) -> str:

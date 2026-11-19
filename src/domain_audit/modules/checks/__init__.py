@@ -30,6 +30,8 @@ from .access import AccessChecker
 from .wsus import WSUSChecker
 from .dc_vulns import DCVulnsChecker
 from .ntlm import NTLMChecker
+from .llmnr import LLMNRChecker
+from .shares import FileShareChecker
 from .dc_rdp import DCRDPChecker
 from .badsuccessor import BadSuccessorChecker
 
@@ -59,7 +61,9 @@ AVAILABLE_CHECKS = {
     'trusts': ('Domain trusts', 'trust_checker', 'check_trusts'),
     'azure': ('Azure/Entra Connect and AZUREADSSOACC', 'azure_checker', 'run_all_checks'),
     'sccm': ('SCCM/MECM configuration', 'sccm_checker', 'check_sccm'),
-    'ldap': ('LDAP security settings', 'ldap_checker', 'check_ldap'),
+    'ldap': ('LDAP anonymous bind, signing and channel binding', 'ldap_checker', 'check_ldap'),
+    'sysvol': ('SYSVOL/NETLOGON passwords (GPP cpassword/autologon, keywords)', 'file_share_checker', 'check_shares'),
+    'spooler': ('Print Spooler on domain controllers', 'dc_vulns_checker', 'check_printspooler'),
     'ldap-anonymous-bind': ('LDAP anonymous (unauthenticated) bind check', 'ldap_checker', '_check_ldap_anonymous_bind'),
     'network': ('Network enumeration', 'network_checker', 'check_network'),
     'cve': ('CVE / NTLM reflection + WebClient (netexec enum_cve)', 'network_checker', 'check_webclient_cve'),
@@ -69,7 +73,8 @@ AVAILABLE_CHECKS = {
     'sql': ('SQL Server enumeration', 'sql_checker', 'check_sql'),
     'wsus': ('WSUS HTTP configuration (MITM vulnerability)', 'wsus_checker', 'check_wsus'),
     'dc-vulns': ('DC vulnerabilities (Zerologon, NoPac)', 'dc_vulns_checker', 'check_dc_vulnerabilities'),
-    'ntlm': ('NTLM security (NTLMv1 support, NTLM restrictions)', 'ntlm_checker', 'check_ntlm'),
+    'ntlm': ('NTLM security (NTLMv1 support, NTLM restrictions, LM hash storage)', 'ntlm_checker', 'check_ntlm'),
+    'llmnr': ('LLMNR disabled by GPO (per computer)', 'llmnr_checker', 'check_llmnr'),
 }
 
 
@@ -104,11 +109,11 @@ class SecurityChecker:
         self.password_checker = PasswordChecker(ldap_conn, output_paths,
                                                   server=ldap_conn.config.server,
                                                   username=username, password=password,
-                                                  domain=domain)
+                                                  domain=domain, hashes=hashes)
         self.laps_checker = LAPSChecker(ldap_conn, output_paths,
                                         server=ldap_conn.config.server,
                                         username=username, password=password,
-                                        domain=domain)
+                                        domain=domain, hashes=hashes)
         self.description_checker = DescriptionChecker(ldap_conn, output_paths)
         self.roasting_checker = RoastingChecker(
             ldap_conn, output_paths,
@@ -132,7 +137,9 @@ class SecurityChecker:
                                               target_scope=self.target_scope,
                                               target_files=self.target_files)
         self.ldap_checker = LDAPChecker(ldap_conn, output_paths, server=ldap_conn.config.server,
-                                         username=username, password=password, domain=domain)
+                                         username=username, password=password, domain=domain, hashes=hashes)
+        self.file_share_checker = FileShareChecker(ldap_conn, output_paths, domain=domain, username=username,
+                                                   password=password, hashes=hashes)
         self.trust_checker = TrustChecker(ldap_conn, output_paths)
         self.azure_checker = AzureChecker(ldap_conn, output_paths)
         self.sccm_checker = SCCMChecker(ldap_conn, output_paths)
@@ -158,14 +165,16 @@ class SecurityChecker:
         self.wsus_checker = WSUSChecker(ldap_conn, output_paths,
                                          server=ldap_conn.config.server,
                                          domain=domain, username=username,
-                                         password=password)
+                                         password=password, hashes=hashes)
         self.dc_vulns_checker = DCVulnsChecker(ldap_conn, output_paths,
                                                 domain=domain, username=username,
                                                 password=password, hashes=hashes)
         self.ntlm_checker = NTLMChecker(ldap_conn, output_paths,
                                          server=ldap_conn.config.server,
                                          domain=domain, username=username,
-                                         password=password)
+                                         password=password, hashes=hashes)
+        self.llmnr_checker = LLMNRChecker(ldap_conn, output_paths, domain=domain, username=username,
+                                          password=password, hashes=hashes)
     
     def run_all_checks(self):
         """Run all Phase 4 and 5 security checks."""
@@ -189,6 +198,7 @@ class SecurityChecker:
         
         # NTLM security checks
         self.ntlm_checker.check_ntlm()
+        self.llmnr_checker.check_llmnr()
         
         # Phase 5 checks
         self.logger.section("SECURITY CHECKS - PART 2")
@@ -221,6 +231,8 @@ class SecurityChecker:
         # Phase 8 checks
         self.logger.section("SECURITY CHECKS - PART 6")
         self.ldap_checker.check_ldap()
+        self.file_share_checker.check_shares()
+        self.dc_vulns_checker.check_printspooler()
         
         # Phase 9 checks
         self.logger.section("SECURITY CHECKS - PART 7")
@@ -290,5 +302,6 @@ __all__ = [
     'OutdatedChecker', 'ADIDNSChecker', 'ExchangeChecker', 'ADCSChecker',
     'NetworkChecker', 'LDAPChecker', 'TrustChecker', 'AzureChecker', 'SCCMChecker',
     'BloodHoundChecker', 'SQLChecker', 'PrivilegedGroupsChecker', 'SMBChecker',
-    'AccessChecker', 'WSUSChecker', 'DCVulnsChecker', 'NTLMChecker', 'DCRDPChecker', 'BadSuccessorChecker'
+    'AccessChecker', 'WSUSChecker', 'DCVulnsChecker', 'NTLMChecker', 'DCRDPChecker', 'BadSuccessorChecker',
+    'LLMNRChecker', 'FileShareChecker'
 ]

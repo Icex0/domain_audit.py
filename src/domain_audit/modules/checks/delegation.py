@@ -1,6 +1,6 @@
 """Delegation security checks."""
 
-from typing import Dict, List
+from typing import Dict
 from pathlib import Path
 
 from ...utils.logger import get_logger

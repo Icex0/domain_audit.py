@@ -1,7 +1,7 @@
 """Azure AD Connect checks."""
 
 import re
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Dict, List, Optional
 from pathlib import Path
 
@@ -10,6 +10,7 @@ from ldap3.utils.conv import escape_filter_chars
 from ...utils.logger import get_logger
 from ...utils.ldap import LDAPConnection
 from ...utils.output import write_csv, write_file, write_lines
+from ...utils.timeutil import to_datetime
 
 
 _CONNECT_SERVER_PATTERNS = [
@@ -85,19 +86,6 @@ def _ldap_or_filter(attribute: str, values: List) -> str:
     if len(terms) == 1:
         return terms[0]
     return f"(|{''.join(terms)})"
-
-
-def _coerce_ad_datetime(value) -> Optional[datetime]:
-    if isinstance(value, datetime):
-        return value
-
-    value = _coerce_int(value)
-    if value and value > 0:
-        windows_epoch_diff = 116444736000000000
-        unix_timestamp = (value - windows_epoch_diff) / 10000000
-        return datetime.fromtimestamp(unix_timestamp, timezone.utc)
-
-    return None
 
 
 class AzureChecker:
@@ -181,7 +169,8 @@ class AzureChecker:
                         })
                         self.logger.warning(f"[!] Found Azure-related account: {username}")
                         
-                except Exception:
+                except Exception as e:
+                    self.logger.debug(f"Azure AD Connect lookup failed: {e}")
                     continue
                     
         except Exception as e:
@@ -251,7 +240,8 @@ class AzureChecker:
                         })
                         self.logger.warning(f"[!] Found Azure AD Connect group: {group_cn} ({member_count} members)")
                         
-                except Exception:
+                except Exception as e:
+                    self.logger.debug(f"Azure AD Connect lookup failed: {e}")
                     continue
                     
         except Exception as e:
@@ -369,7 +359,7 @@ class AzureChecker:
         uac = _coerce_int(account.get('userAccountControl')) or 0
 
         if uac & TRUSTED_FOR_DELEGATION:
-            self.logger.finding(f"AZUREADSSOACC has unconstrained Kerberos delegation ENABLED (vulnerable!)")
+            self.logger.finding("AZUREADSSOACC has unconstrained Kerberos delegation ENABLED (vulnerable!)")
             findings.append("CRITICAL: Unconstrained Kerberos delegation is ENABLED on AZUREADSSOACC - should be disabled")
         else:
             self.logger.success("[+] AZUREADSSOACC is not trusted for unconstrained Kerberos delegation")
@@ -402,7 +392,7 @@ class AzureChecker:
     def _check_azureadssoacc_key_age(self, account: Dict, findings: List[str]):
         """Check AZUREADSSOACC Kerberos decryption key age."""
         pwd_last_set = account.get('pwdLastSet')
-        pwd_date = _coerce_ad_datetime(pwd_last_set)
+        pwd_date = to_datetime(pwd_last_set)
         if pwd_date:
             now = datetime.now(pwd_date.tzinfo) if pwd_date.tzinfo else datetime.now()
             age_days = (now - pwd_date).days
@@ -413,7 +403,7 @@ class AzureChecker:
                 findings.append(f"Last password change: {pwd_date.strftime('%Y-%m-%d')}")
             else:
                 self.logger.success(f"[+] AZUREADSSOACC Kerberos key is {age_days} days old (within 30-day window)")
-        elif pwd_last_set in (0, "0"):
+        elif pwd_last_set in (0, "0") or (isinstance(pwd_last_set, datetime) and pwd_last_set.year <= 1601):
             self.logger.warning("[!] AZUREADSSOACC password never set")
             findings.append("WARNING: Password appears to never have been set")
         else:

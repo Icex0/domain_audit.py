@@ -25,7 +25,7 @@ except ValueError:
 
 from ldap3 import Server, Connection, NTLM, SUBTREE, ALL_ATTRIBUTES, ENCRYPT, TLS_CHANNEL_BINDING
 from ldap3.core.exceptions import (
-    LDAPBindError, LDAPSocketOpenError, LDAPException, LDAPCommunicationError
+    LDAPBindError, LDAPSocketOpenError, LDAPException, LDAPCommunicationError, LDAPNoSuchObjectResult
 )
 
 from ..utils.logger import get_logger
@@ -183,6 +183,38 @@ class LDAPConnection:
             self.logger.error(f"LDAP query failed: {e}")
             raise EnumerationError(f"Query failed: {e}")
     
+    def query_raw(self, search_base: str, search_filter: str, attributes: List[str] = None,
+                  scope=SUBTREE, controls=None) -> List[Dict]:
+        """Paged search with reconnect, returning raw entries.
+
+        Use this instead of connection.search when the raw attribute bytes or
+        LDAP controls (e.g. the SD flags control for nTSecurityDescriptor) are
+        needed. Each result has 'dn', 'attributes' (formatted) and
+        'raw_attributes' (lists of bytes).
+        """
+        if not self.connection:
+            raise ConnectionError("LDAP not connected")
+        try:
+            response = self._paged_search_with_retry(
+                search_base=search_base,
+                search_filter=search_filter,
+                search_scope=scope,
+                attributes=attributes if attributes else ALL_ATTRIBUTES,
+                controls=controls,
+                paged_size=self.PAGE_SIZE,
+                generator=False
+            )
+        except LDAPNoSuchObjectResult:
+            return []  # base DN doesn't exist (e.g. missing DNS partition / record)
+        except LDAPException as e:
+            self.logger.error(f"LDAP query failed: {e}")
+            raise EnumerationError(f"Query failed: {e}")
+        return [
+            {'dn': entry.get('dn', ''), 'attributes': entry.get('attributes', {}),
+             'raw_attributes': entry.get('raw_attributes', {})}
+            for entry in response if entry.get('type') == 'searchResEntry'
+        ]
+
     def get_config_dn(self) -> str:
         """Get the Configuration naming context from RootDSE."""
         if not self.connection:

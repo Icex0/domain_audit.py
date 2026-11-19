@@ -26,7 +26,7 @@ class DomainChecker:
             results = self.ldap.query(
                 search_base=self.base_dn,
                 search_filter='(objectClass=domainDNS)',
-                attributes=['msDS-Behavior-Version', 'name', 'dc']
+                attributes=['msDS-Behavior-Version', 'name', 'dc', 'distinguishedName']
             )
             
             if not results:
@@ -47,7 +47,7 @@ class DomainChecker:
                 f"Domain: {domain_data.get('name', 'unknown')}",
                 f"Functional Level: {level_name}",
                 f"Level Number: {level}",
-                f"Distinguished Name: {domain_data.get('dn', 'unknown')}",
+                f"Distinguished Name: {domain_data.get('distinguishedName', 'unknown')}",
                 "",
                 "Raw Data:",
                 f"  msDS-Behavior-Version: {domain_data.get('msDS-Behavior-Version', 'N/A')}",

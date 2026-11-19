@@ -9,13 +9,14 @@ Sources, in order of reliability:
    (local policy could still differ - reported as not certain).
 """
 
-import io
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set
 
 from ldap3.utils.conv import escape_filter_chars
 
-from .gpttmpl import parse_gpttmpl_inf
+from .admins import AdminResolver
+from .sysvol import SysvolClient
+from .dc import get_domain_controllers
 
 # Well-known SIDs that are (or contain) admins / the system - not "normal users"
 ADMIN_WELL_KNOWN = {'S-1-5-32-544', 'S-1-5-18', 'S-1-5-9'}
@@ -46,6 +47,7 @@ class DCUserRights:
             self.lmhash, self.nthash = hashes.split(':') if ':' in hashes else ('', hashes)
         self._gpo_rights: Optional[Dict[str, Dict[str, str]]] = None
         self._sid_cache: Dict[str, Optional[Dict]] = {}
+        self.admins = AdminResolver(ldap_conn)
         self._scope = None
 
     # ---- LSA ----
@@ -79,31 +81,17 @@ class DCUserRights:
 
     # ---- GPO ----
     def _load_gpo_rights(self) -> Dict[str, Dict[str, str]]:
-        """{GPO GUID upper: {right lowercase: raw value}} from SYSVOL GptTmpl.inf files."""
-        if self._gpo_rights is not None:
-            return self._gpo_rights
-        from impacket.smbconnection import SMBConnection
-        server = self.ldap.config.server
-        conn = SMBConnection(server, server)
-        conn.login(self.username, self.password, self.domain, self.lmhash, self.nthash)
-        values: Dict[str, Dict[str, str]] = {}
-        try:
-            for entry in conn.listPath('SYSVOL', f"{self.domain}/Policies/*"):
-                guid = entry.get_longname()
-                if guid in ('.', '..') or not entry.is_directory():
-                    continue
-                buf = io.BytesIO()
-                try:
-                    conn.getFile('SYSVOL', f"{self.domain}/Policies/{guid}/Machine/Microsoft/Windows NT/SecEdit/GptTmpl.inf", buf.write)
-                except Exception:
-                    continue
-                rights = parse_gpttmpl_inf(buf.getvalue()).get('Privilege Rights', {})
+        """{GPO GUID upper: {right lowercase: raw value}} from the GPOs' GptTmpl.inf."""
+        if self._gpo_rights is None:
+            sysvol = SysvolClient.shared(self.ldap, self.domain, self.username, self.password,
+                                         f"{self.lmhash}:{self.nthash}" if self.nthash else None, self.logger)
+            values: Dict[str, Dict[str, str]] = {}
+            for guid in sysvol.gpo_folders():
+                rights = sysvol.gpttmpl(guid).get('Privilege Rights', {})
                 if rights:
                     values[guid.upper()] = {k: (v or '') for k, v in rights.items()}
-        finally:
-            conn.logoff()
-        self._gpo_rights = values
-        return values
+            self._gpo_rights = values
+        return self._gpo_rights
 
     def gpo_value(self, dc: Dict, right: str):
         """Effective GPO value (ScopeResult) of `right` for this DC."""
@@ -136,30 +124,11 @@ class DCUserRights:
 
     # ---- principal classification ----
     def _domain_sid(self) -> str:
-        if not hasattr(self, '_dsid'):
-            self._dsid = self.ldap.get_domain_sid()
-        return self._dsid
+        return self.admins.domain_sid
 
     def _admin_user_dns(self) -> Set[str]:
-        """Lower-cased DNs of all (nested) members of Administrators, Domain Admins, Enterprise Admins."""
-        if hasattr(self, '_admins'):
-            return self._admins
-        admins: Set[str] = set()
-        for sid in ('S-1-5-32-544', f'{self._domain_sid()}-512', f'{self._domain_sid()}-519'):
-            group = self.ldap.query(self.base_dn, f'(objectSid={sid})', ['distinguishedName'])
-            if not group or not group[0].get('distinguishedName'):
-                continue
-            dn = group[0]['distinguishedName']
-            admins.add(dn.lower())
-            for m in self.ldap.query(self.base_dn, f'(memberOf:{CHAIN}:={escape_filter_chars(dn)})', ['distinguishedName']):
-                if m.get('distinguishedName'):
-                    admins.add(m['distinguishedName'].lower())
-        rid_filter = f'(|(primaryGroupID=512)(primaryGroupID=519))'
-        for m in self.ldap.query(self.base_dn, f'(&(objectClass=user){rid_filter})', ['distinguishedName']):
-            if m.get('distinguishedName'):
-                admins.add(m['distinguishedName'].lower())
-        self._admins = admins
-        return admins
+        """Lower-cased DNs of all admins (see utils.admins)."""
+        return self.admins.admin_dns()
 
     def _lookup_sid(self, sid: str) -> Optional[Dict]:
         if sid not in self._sid_cache:
@@ -253,11 +222,7 @@ def users_can_create_computers(ldap_conn, logger, domain: str, username: str = N
         return ComputerCreation(False, quota)
 
     rights = DCUserRights(ldap_conn, logger, domain, username, password, hashes)
-    dcs = ldap_conn.query(
-        base_dn,
-        '(&(objectClass=computer)(userAccountControl:1.2.840.113556.1.4.803:=8192))',
-        ['sAMAccountName', 'dNSHostName', 'distinguishedName', 'objectSid', 'primaryGroupID', 'userAccountControl']
-    )
+    dcs = get_domain_controllers(ldap_conn)
     holders, sources, errors = set(), set(), []
     for dc in dcs:
         res = rights.holders(dc, 'SeMachineAccountPrivilege', None, {'S-1-5-11'})  # default: Authenticated Users

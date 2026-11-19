@@ -1,18 +1,15 @@
 """Active Directory authentication and credential management."""
 
-import sys
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Optional
 
 from impacket.smbconnection import SMBConnection
-from impacket.krb5.kerberosv5 import KerberosError
 from ldap3 import Server, Connection, NTLM, AUTO_BIND_NONE
 from ldap3.core.exceptions import LDAPBindError, LDAPSocketOpenError
 
 from ..utils.logger import get_logger
 from ..utils.dc import check_dc_reachable
 from ..utils.ldap import ntlm_session_options
-from .exceptions import ConnectionError
 
 
 @dataclass
@@ -97,7 +94,7 @@ class ADAuthManager:
             
             if self.creds.has_ntlm_hash():
                 # Pass-the-hash authentication
-                from impacket.ldap import ldap
+                pass
                 # Use LDAP with NTLM and hash
                 conn = Connection(
                     server,
@@ -165,14 +162,14 @@ class ADAuthManager:
         if self.ldap_connection:
             try:
                 self.ldap_connection.unbind()
-            except:
-                pass
+            except Exception:
+                pass  # best effort while closing
         
         if self.smb_connection:
             try:
                 self.smb_connection.close()
-            except:
-                pass
+            except Exception:
+                pass  # best effort while closing
 
 
 

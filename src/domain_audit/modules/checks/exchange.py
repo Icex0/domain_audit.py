@@ -10,6 +10,7 @@ from ldap3.utils.conv import escape_filter_chars
 from ...utils.logger import get_logger
 from ...utils.ldap import LDAPConnection
 from ...utils.output import write_csv, write_lines
+from ...utils.timeutil import to_datetime
 from ...utils.acl import SD_FLAGS_DACL, WRITE_DAC, WRITE_OWNER, right_decisions
 
 
@@ -57,20 +58,6 @@ class ExchangeChecker:
             attributes=attributes
         )
 
-    @staticmethod
-    def _to_datetime(value) -> Optional[datetime]:
-        """Convert lastLogonTimestamp (datetime from ldap3, or raw FILETIME) to aware UTC datetime."""
-        if isinstance(value, list):
-            value = value[0] if value else None
-        if isinstance(value, datetime):
-            return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
-        try:
-            filetime = int(value)
-        except (TypeError, ValueError):
-            return None
-        if filetime <= 0:
-            return None
-        return datetime.fromtimestamp(filetime / 10_000_000 - 11644473600, tz=timezone.utc)
     
     def _check_exchange_groups(self):
         """Check for Exchange groups and enumerate memberships."""
@@ -146,7 +133,7 @@ class ExchangeChecker:
                 recent_logons = []
 
                 for server in exchange_servers:
-                    last_logon = self._to_datetime(server.get('lastLogonTimestamp'))
+                    last_logon = to_datetime(server.get('lastLogonTimestamp'))
                     if last_logon and last_logon > cutoff:
                         recent_logons.append(server)
                 
@@ -197,14 +184,9 @@ class ExchangeChecker:
                 self.logger.info("[*] Exchange Windows Permissions / Exchange Trusted Subsystem groups not found")
                 return
             
-            self.ldap.connection.search(
-                search_base=self.base_dn,
-                search_filter='(objectClass=domainDNS)',
-                search_scope=ldap3.BASE,
-                attributes=['nTSecurityDescriptor'],
-                controls=SD_FLAGS_DACL
-            )
-            raw = self.ldap.connection.entries[0]['nTSecurityDescriptor'].raw_values if self.ldap.connection.entries else []
+            result = self.ldap.query_raw(self.base_dn, '(objectClass=domainDNS)', ['nTSecurityDescriptor'],
+                                         scope=ldap3.BASE, controls=SD_FLAGS_DACL)
+            raw = result[0]['raw_attributes'].get('nTSecurityDescriptor') if result else []
             if not raw:
                 self.logger.warning("[!] Could not read the domain object's DACL - verify Exchange WriteDACL manually")
                 return

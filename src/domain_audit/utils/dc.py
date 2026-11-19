@@ -1,4 +1,4 @@
-"""Domain controller reachability and selection helpers."""
+"""Domain controller lookup, reachability and selection helpers."""
 
 import socket
 from typing import Dict, List, Optional
@@ -47,3 +47,24 @@ def select_reachable_dc(dcs: List[Dict], fallback: Optional[str] = None,
     if logger:
         logger.warning(f"[!] No domain controller reachable on port {port}, using {hostnames[0]}")
     return hostnames[0]
+
+
+# Computers with SERVER_TRUST_ACCOUNT (0x2000) in userAccountControl = writable DCs
+DC_FILTER = '(&(objectClass=computer)(userAccountControl:1.2.840.113556.1.4.803:=8192))'
+DC_ATTRIBUTES = ['sAMAccountName', 'name', 'dNSHostName', 'distinguishedName', 'operatingSystem',
+                 'objectSid', 'primaryGroupID', 'userAccountControl']
+
+
+def get_domain_controllers(ldap_conn, attributes: Optional[List[str]] = None) -> List[Dict]:
+    """Return the domain controllers of the connected domain."""
+    return ldap_conn.query(ldap_conn.config.base_dn, DC_FILTER, attributes or DC_ATTRIBUTES)
+
+
+def reachable_dc_hostname(ldap_conn, logger=None, port: int = 445) -> str:
+    """dNSHostName of the first DC reachable on `port`, or the configured server."""
+    try:
+        dcs = get_domain_controllers(ldap_conn, ['dNSHostName'])
+    except Exception:
+        dcs = []
+    return select_reachable_dc(dcs, fallback=ldap_conn.config.server, port=port, logger=logger) \
+        if dcs else ldap_conn.config.server

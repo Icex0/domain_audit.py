@@ -16,6 +16,7 @@ from ...utils.logger import get_logger
 from ...utils.ldap import LDAPConnection
 from ...utils.output import write_lines
 from ...utils.user_rights import DCUserRights
+from ...utils.dc import get_domain_controllers
 
 ALLOW_RIGHT = 'SeRemoteInteractiveLogonRight'
 DENY_RIGHT = 'SeDenyRemoteInteractiveLogonRight'
@@ -38,11 +39,7 @@ class DCRDPChecker:
     def check_dc_rdp(self):
         self.logger.info("---Checking which non-admins can log on to domain controllers over RDP---")
         try:
-            dcs = self.ldap.query(
-                self.base_dn,
-                '(&(objectClass=computer)(userAccountControl:1.2.840.113556.1.4.803:=8192))',
-                ['sAMAccountName', 'dNSHostName', 'distinguishedName', 'objectSid', 'primaryGroupID', 'userAccountControl']
-            )
+            dcs = get_domain_controllers(self.ldap)
         except Exception as e:
             self.logger.error(f"[-] Could not list domain controllers: {e}")
             return

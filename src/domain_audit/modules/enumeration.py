@@ -1,15 +1,14 @@
 """Active Directory enumeration module."""
 
-import csv
-from typing import Dict, List, Optional
+from typing import Dict, List
 from pathlib import Path
 from dataclasses import dataclass
 
 from ..utils.logger import get_logger
-from ..utils.ldap import LDAPConnection, LDAPConfig
+from ..utils.ldap import LDAPConnection
 from ..utils.output import write_csv, write_lines
-from ..core.exceptions import EnumerationError
-from ldap3.utils.conv import escape_filter_chars
+from ..utils.dc import DC_FILTER
+from ..utils.admins import AdminResolver
 
 
 @dataclass
@@ -165,7 +164,7 @@ class ADEnumerator:
         
         dcs = self.ldap.query(
             search_base=self.base_dn,
-            search_filter='(&(objectClass=computer)(userAccountControl:1.2.840.113556.1.4.803:=8192))',
+            search_filter=DC_FILTER,
             attributes=attributes
         )
         
@@ -175,32 +174,6 @@ class ADEnumerator:
         
         return dcs
     
-
-    def get_privileged_user_members(self, domain_sid: str, rid: int) -> Optional[List[str]]:
-        """Return sAMAccountNames of all users in a privileged group (by RID),
-        including nested members and users with it as primary group.
-
-        Returns None if the group doesn't exist in this domain.
-        """
-        group_result = self.ldap.query(
-            search_base=self.base_dn,
-            search_filter=f'(objectSid={domain_sid}-{rid})',
-            attributes=['distinguishedName']
-        )
-        if not group_result or not group_result[0].get('distinguishedName'):
-            return None
-        group_dn = escape_filter_chars(group_result[0]['distinguishedName'])
-        # memberOf with LDAP_MATCHING_RULE_IN_CHAIN resolves nested groups;
-        # primary group membership (primaryGroupID) isn't stored in memberOf.
-        members = self.ldap.query(
-            search_base=self.base_dn,
-            search_filter=(
-                f'(&(objectCategory=person)(objectClass=user)'
-                f'(|(memberOf:1.2.840.113556.1.4.1941:={group_dn})(primaryGroupID={rid})))'
-            ),
-            attributes=['sAMAccountName']
-        )
-        return sorted({m['sAMAccountName'] for m in members if m.get('sAMAccountName')}, key=str.lower)
 
     def enumerate_privileged_group_members(self, domain_sid: str) -> dict:
         """Enumerate effective user members (direct and nested) of Domain Admins
@@ -214,7 +187,7 @@ class ADEnumerator:
         
         for group_name, rid in (('Domain Admins', 512), ('Enterprise Admins', 519)):
             try:
-                usernames = self.get_privileged_user_members(domain_sid, rid)
+                usernames = AdminResolver(self.ldap).admin_user_names(rid)
                 if usernames is None:
                     self.logger.warning(f"[!] Could not find {group_name} group")
                     continue

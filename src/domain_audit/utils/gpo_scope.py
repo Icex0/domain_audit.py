@@ -24,7 +24,6 @@ import re
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple
 
-import ldap3
 from ldap3.utils.conv import escape_filter_chars
 from ldap3.utils.dn import to_dn
 
@@ -85,10 +84,7 @@ class GPOScope:
             self.logger.debug(msg)
 
     def _paged(self, base, search_filter, attributes, controls=None):
-        return [e for e in self.ldap.connection.extend.standard.paged_search(
-            search_base=base, search_filter=search_filter, search_scope=ldap3.SUBTREE,
-            attributes=attributes, controls=controls, paged_size=500, generator=False
-        ) if e.get('type') == 'searchResEntry']
+        return self.ldap.query_raw(base, search_filter, attributes, controls=controls)
 
     def load(self):
         if self._loaded:
@@ -133,6 +129,16 @@ class GPOScope:
 
         self._group_members: Dict[str, Optional[Set[str]]] = {}
         self._loaded = True
+
+    def linked_gpo_guids(self) -> Set[str]:
+        """GUIDs (upper, with braces) of GPOs with at least one enabled link
+        (domain, OU or site). Linked doesn't mean applied - use effective_value
+        for per-computer results."""
+        self.load()
+        guids = {guid for guid, enabled, _ in self.site_links if enabled}
+        for info in self.containers.values():
+            guids |= {guid for guid, enabled, _ in info['links'] if enabled}
+        return guids
 
     def _members_of_sid(self, sid: str) -> Optional[Set[str]]:
         """Lower-cased DNs of computers that are (nested) members of the group with this SID.

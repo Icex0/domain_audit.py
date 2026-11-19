@@ -1,6 +1,5 @@
 """Password policy security checks."""
 
-import io
 from typing import Dict
 from pathlib import Path
 
@@ -8,7 +7,7 @@ from ...utils.logger import get_logger
 from ...utils.ldap import LDAPConnection
 from ...utils.output import write_file, write_lines, write_csv
 from ...utils.gpttmpl import parse_gpttmpl_inf
-from ...utils.dc import select_reachable_dc
+from ...utils.sysvol import GPTTMPL_PATH, SysvolClient, has_credentials
 
 # Default Domain Policy GUID
 DEFAULT_DOMAIN_POLICY_GUID = "{31B2F340-016D-11D2-945F-00C04FB984F9}"
@@ -28,7 +27,7 @@ class PasswordChecker:
     
     def __init__(self, ldap_conn: LDAPConnection, output_paths: Dict[str, Path],
                  server: str = None, username: str = None, password: str = None,
-                 domain: str = None):
+                 domain: str = None, hashes: str = None):
         self.ldap = ldap_conn
         self.output_paths = output_paths
         self.logger = get_logger()
@@ -36,6 +35,7 @@ class PasswordChecker:
         self.server = server or ldap_conn.config.server
         self.username = username
         self.password = password
+        self.hashes = hashes
         self.domain = domain or ldap_conn.config.domain
     
     def check_password_policy(self):
@@ -132,50 +132,15 @@ class PasswordChecker:
         """Check Kerberos policy settings from Default Domain Policy in SYSVOL."""
         self.logger.info("---Checking password policy Kerberos---")
         
-        if not self.username or not self.password:
+        if not has_credentials(self.username, self.password, self.hashes):
             self.logger.warning("[!] Kerberos policy check requires SMB credentials")
             return
         
         try:
-            from impacket.smbconnection import SMBConnection
-        except ImportError:
-            self.logger.error("[-] impacket not available for SYSVOL access")
-            return
-        
-        try:
-            # Get a domain controller
-            dcs = self.ldap.query(
-                search_base=self.base_dn,
-                search_filter='(&(objectClass=computer)(userAccountControl:1.2.840.113556.1.4.803:=8192))',
-                attributes=['dNSHostName', 'name']
-            )
-            
-            if not dcs:
-                self.logger.warning("[!] No domain controllers found, using configured server")
-                dc_hostname = self.server
-            else:
-                dc_hostname = select_reachable_dc(dcs, fallback=self.server, logger=self.logger)
-            
-            # Connect to SYSVOL
-            conn = SMBConnection(dc_hostname, dc_hostname)
-            conn.login(self.username, self.password, self.domain)
-            
-            # Path to GptTmpl.inf in Default Domain Policy
-            gpt_path = f"{self.domain}/Policies/{DEFAULT_DOMAIN_POLICY_GUID}/MACHINE/Microsoft/Windows NT/SecEdit/GptTmpl.inf"
-            
-            try:
-                # Use getFile which handles read-only access properly
-                content_buffer = io.BytesIO()
-                conn.getFile('SYSVOL', gpt_path, content_buffer.write)
-                content = content_buffer.getvalue()
-                conn.logoff()
-            except Exception as e:
-                self.logger.error(f"[-] Could not read GptTmpl.inf from SYSVOL: {e}")
-                conn.logoff()
-                return
-            
+            sysvol = SysvolClient.shared(self.ldap, self.domain, self.username, self.password, self.hashes, self.logger)
+            content = sysvol.gpo_file(DEFAULT_DOMAIN_POLICY_GUID, GPTTMPL_PATH)
             if not content:
-                self.logger.warning("[!] GptTmpl.inf is empty or not readable")
+                self.logger.warning("[!] GptTmpl.inf of the Default Domain Policy is empty or not readable")
                 return
             
             # Parse the INI-style file

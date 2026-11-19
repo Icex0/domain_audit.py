@@ -3,12 +3,11 @@
 from typing import Dict, Optional
 from pathlib import Path
 
-import ldap3
 
 from ...utils.logger import get_logger
 from ...utils.ldap import LDAPConnection
 from ...utils.output import write_lines
-from ...utils.acl import ADS_RIGHT_DS_CREATE_CHILD, right_decisions
+from ...utils.acl import ADS_RIGHT_DS_CREATE_CHILD, SD_FLAGS_OWNER_GROUP_DACL, right_decisions
 from ...tools.powermad import ADIDNSEnumerator
 
 # schemaIDGUID of the dnsNode class (DNS records are dnsNode child objects)
@@ -96,19 +95,17 @@ class ADIDNSChecker:
             nonsecure, checked = [], 0
             for label, base in bases.items():
                 try:
-                    self.ldap.connection.search(base, '(objectClass=dnsZone)', ldap3.SUBTREE,
-                                                attributes=['name', 'dNSProperty'])
+                    zones = self.ldap.query_raw(base, '(objectClass=dnsZone)', ['name', 'dNSProperty'])
                 except Exception as e:
                     self.logger.debug(f"Could not search {base}: {e}")
                     continue
-                for entry in self.ldap.connection.entries:
-                    raw = entry['dNSProperty'].raw_values if 'dNSProperty' in entry else []
-                    value = self.zone_allow_update(raw)
+                for zone in zones:
+                    value = self.zone_allow_update(zone['raw_attributes'].get('dNSProperty') or [])
                     if value is None:
                         continue
                     checked += 1
                     if value == self.ZONE_UPDATE_UNSECURE:
-                        nonsecure.append(f"{entry['name'].value} ({label} zone)")
+                        nonsecure.append(f"{zone['attributes'].get('name')} ({label} zone)")
             
             if nonsecure:
                 self.logger.finding(f"{len(nonsecure)} DNS zone(s) allow nonsecure dynamic updates: {', '.join(nonsecure)}")
@@ -151,23 +148,19 @@ class ADIDNSChecker:
                     for dc in self.domain.split('.'):
                         search_base += f",DC={dc}"
 
-                    # Search for the zone with security descriptor
-                    self.ldap.connection.search(
-                        search_base=search_base,
-                        search_filter=f'(&(objectClass=dnsZone)(name={self.domain}))',
-                        attributes=['distinguishedName', 'nTSecurityDescriptor'],
-                        search_scope=ldap3.SUBTREE,
-                        controls=[('1.2.840.113556.1.4.801', True, b'\x30\x03\x02\x01\x07')]  # Request DACL
-                    )
-                except Exception:
+                    # Search for the zone with security descriptor (owner, group, DACL)
+                    zones = self.ldap.query_raw(search_base, f'(&(objectClass=dnsZone)(name={self.domain}))',
+                                                ['distinguishedName', 'nTSecurityDescriptor'],
+                                                controls=SD_FLAGS_OWNER_GROUP_DACL)
+                except Exception as e:
+                    self.logger.debug(f"Could not search {search_base}: {e}")
                     continue
 
-                if not self.ldap.connection.entries:
+                if not zones:
                     continue
 
-                entry = self.ldap.connection.entries[0]
-                zone_dn = str(entry.entry_dn)
-                raw_values = entry['nTSecurityDescriptor'].raw_values
+                zone_dn = zones[0]['dn']
+                raw_values = zones[0]['raw_attributes'].get('nTSecurityDescriptor') or []
                 sd_raw = raw_values[0] if raw_values else None
 
                 if not sd_raw:
@@ -262,18 +255,13 @@ class ADIDNSChecker:
 
             # Try different partitions for wildcard
             partitions = ["DomainDNSZones", "ForestDNSZones", "System"]
-            wildcard_exists = False
-
-            for partition in partitions:
-                try:
-                    if enumerator.check_wildcard_record(self.domain, partition):
-                        wildcard_exists = True
-                        break
-                except Exception:
-                    continue
+            results = [enumerator.check_wildcard_record(self.domain, partition) for partition in partitions]
+            wildcard_exists = any(r is True for r in results)
 
             if wildcard_exists:
                 self.logger.success("[+] Wildcard record in ADIDNS exists")
+            elif None in results:
+                self.logger.warning("[!] Wildcard record lookup failed in at least one DNS partition - verify manually")
             elif can_create:
                 self.logger.finding("No wildcard record in ADIDNS and low-privileged users can add records - wildcard poisoning possible")
                 write_lines(

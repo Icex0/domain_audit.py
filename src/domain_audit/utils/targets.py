@@ -7,8 +7,9 @@ import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, List, Optional, Tuple, Union
+from typing import Iterable, List, Optional, Union
 
+from .dc import get_domain_controllers
 from .ip_exclusions import IPExclusions
 
 IPAddress = Union[ipaddress.IPv4Address, ipaddress.IPv6Address]
@@ -55,11 +56,7 @@ class TargetScope:
         dcs = domain_controllers
         if dcs is None:
             try:
-                dcs = ldap_conn.query(
-                    search_base=ldap_conn.config.base_dn,
-                    search_filter='(&(objectClass=computer)(userAccountControl:1.2.840.113556.1.4.803:=8192))',
-                    attributes=['dNSHostName', 'name']
-                )
+                dcs = get_domain_controllers(ldap_conn, ['dNSHostName', 'name'])
             except Exception as e:
                 if logger:
                     logger.warning(f"[!] Could not resolve all DC exclusions safely: {e}")

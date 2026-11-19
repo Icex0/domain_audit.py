@@ -1,7 +1,5 @@
 """WSUS security checks - detect HTTP WSUS which is vulnerable to MITM attacks."""
 
-import io
-import re
 import struct
 from urllib.parse import urlparse
 from typing import Dict, List, Optional
@@ -9,8 +7,9 @@ from pathlib import Path
 
 from ...utils.logger import get_logger
 from ...utils.ldap import LDAPConnection
-from ...utils.output import write_file, write_lines
+from ...utils.output import write_lines
 from ...utils.registry_pol import parse_pol_file
+from ...utils.sysvol import SysvolClient, has_credentials
 
 
 class WSUSChecker:
@@ -18,7 +17,7 @@ class WSUSChecker:
     
     def __init__(self, ldap_conn: LDAPConnection, output_paths: Dict[str, Path],
                  server: str = None, username: str = None, password: str = None,
-                 domain: str = None):
+                 domain: str = None, hashes: str = None):
         self.ldap = ldap_conn
         self.output_paths = output_paths
         self.logger = get_logger()
@@ -26,29 +25,24 @@ class WSUSChecker:
         self.server = server or ldap_conn.config.server
         self.username = username
         self.password = password
+        self.hashes = hashes
         self.domain = domain or ldap_conn.config.domain
     
     def check_wsus(self):
         """Check WSUS configuration for HTTP usage (vulnerable to MITM)."""
         self.logger.info("---Checking WSUS configuration for HTTP usage---")
         
-        if not self.username or not self.password:
+        if not has_credentials(self.username, self.password, self.hashes):
             self.logger.warning("[!] WSUS check requires SMB credentials")
             return
         
         try:
-            from impacket.smbconnection import SMBConnection, SessionError
-        except ImportError:
-            self.logger.error("[-] impacket not available for SYSVOL access")
-            return
-        
-        try:
-            conn = SMBConnection(self.server, self.server)
-            conn.login(self.username, self.password, self.domain)
-            
-            wsus_policies = self._extract_wsus_policies(conn)
-            
-            conn.logoff()
+            sysvol = SysvolClient.shared(self.ldap, self.domain, self.username, self.password, self.hashes, self.logger)
+            wsus_policies = []
+            for guid in sysvol.gpo_folders():
+                info = self._parse_wsus_entries(sysvol.registry_pol(guid), guid)
+                if info:
+                    wsus_policies.append(info)
             
             url_policies = [p for p in wsus_policies if p['url']]
             if not url_policies:
@@ -176,50 +170,14 @@ class WSUSChecker:
         if not http_policies:
             self.logger.success("[+] No active WSUS policies use HTTP")
     
-    def _extract_wsus_policies(self, conn) -> List[Dict]:
-        """Extract WSUS server configuration from all GPO Registry.pol files."""
-        from impacket.smbconnection import SessionError
-        
-        wsus_policies = []
-        
-        try:
-            # List all policies in SYSVOL
-            policies = conn.listPath("SYSVOL", f"{self.domain}/Policies/*")
-        except Exception as e:
-            self.logger.error(f"[-] Could not list SYSVOL policies: {e}")
-            return wsus_policies
-        
-        for policy in policies:
-            policy_name = policy.get_longname()
-            
-            # Skip . and ..
-            if policy_name in ['.', '..']:
-                continue
-            
-            share_path = f"{self.domain}/Policies/{policy_name}/Machine/Registry.pol"
-            
-            try:
-                content_buffer = io.BytesIO()
-                conn.getFile("SYSVOL", share_path, content_buffer.write)
-                content = content_buffer.getvalue()
-                
-                if content:
-                    wsus_info = self._parse_wsus_from_pol(content, policy_name)
-                    if wsus_info:
-                        wsus_policies.append(wsus_info)
-                        
-            except SessionError:
-                # Registry.pol doesn't exist for this GPO, skip silently
-                pass
-            except Exception as e:
-                self.logger.debug(f"Could not read Registry.pol for {policy_name}: {e}")
-        
-        return wsus_policies
-    
     WU_KEY = 'software\\policies\\microsoft\\windows\\windowsupdate'
     AU_KEY = WU_KEY + '\\au'
 
     def _parse_wsus_from_pol(self, content: bytes, gpo_name: str) -> Optional[Dict]:
+        """Parse raw Registry.pol content (see _parse_wsus_entries)."""
+        return self._parse_wsus_entries(parse_pol_file(content), gpo_name)
+
+    def _parse_wsus_entries(self, entries, gpo_name: str) -> Optional[Dict]:
         """Parse Registry.pol content and extract WSUS server configuration.
         
         Looks for (registry keys and value names are case-insensitive):
@@ -228,7 +186,6 @@ class WSUSChecker:
         - Software\\Policies\\Microsoft\\Windows\\WindowsUpdate\\AU\\UseWUServer:
           clients only use WUServer when this is 1
         """
-        entries = parse_pol_file(content)
         url = None
         use_wu_server = None
         

@@ -3,7 +3,7 @@
 Checks for SCCM by looking for the System Management container in LDAP.
 """
 
-from typing import Dict, List
+from typing import Dict
 from pathlib import Path
 
 from ...utils.logger import get_logger
@@ -38,7 +38,7 @@ class SCCMChecker:
             )
             
             if results:
-                self.logger.warning(f"[!] SCCM System Management container found")
+                self.logger.warning("[!] SCCM System Management container found")
                 
                 # Collect info (not a finding - SCCM itself is not a vulnerability)
                 info_lines = [

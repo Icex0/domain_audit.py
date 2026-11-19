@@ -1,7 +1,6 @@
 """Logging utilities with color support."""
 
 import logging
-import sys
 from typing import Optional
 from rich.console import Console
 from rich.logging import RichHandler
@@ -91,6 +90,5 @@ def get_logger(verbose: bool = False) -> AuditLogger:
 
 def set_verbose(verbose: bool):
     """Update verbose mode on existing logger."""
-    global _logger
     if _logger:
         _logger.verbose = verbose

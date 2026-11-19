@@ -7,8 +7,7 @@ Reference: https://github.com/Kevin-Robertson/Powermad
 """
 
 import ldap3
-from typing import List, Dict, Optional
-from pathlib import Path
+from typing import Optional
 
 
 class ADIDNSEnumerator:
@@ -41,49 +40,19 @@ class ADIDNSEnumerator:
         return dns_path
     
 
-    def get_node_attribute(self, node: str, attribute: str = 'dnsRecord', 
-                          zone: Optional[str] = None, partition: str = "DomainDNSZones") -> Optional[bytes]:
-        """Get a specific attribute from an ADIDNS node.
-        
-        Args:
-            node: Node name (e.g., '*' for wildcard)
-            attribute: Attribute to retrieve (default: dnsRecord)
-            zone: DNS zone (defaults to domain)
-            partition: AD partition (DomainDNSZones, ForestDNSZones, System)
-            
-        Returns:
-            Raw attribute value or None if not found
-        """
-        if not zone:
-            zone = self.domain
-        
-        dn = self._build_dn(zone, partition, node)
-        
-        try:
-            self.ldap.connection.search(
-                search_base=dn,
-                search_filter='(objectClass=*)',
-                attributes=[attribute],
-                search_scope=ldap3.BASE
-            )
-            
-            if not self.ldap.connection.entries:
-                return None
-            
-            entry = self.ldap.connection.entries[0]
-            return entry[attribute].value if hasattr(entry, attribute) else None
-            
-        except Exception:
-            return None
     
 
-    def check_wildcard_record(self, zone: Optional[str] = None, 
-                              partition: str = "DomainDNSZones") -> bool:
-        """Check if wildcard record exists in ADIDNS zone.
+    def check_wildcard_record(self, zone: Optional[str] = None,
+                              partition: str = "DomainDNSZones") -> Optional[bool]:
+        """Check if a wildcard ('*') node exists in an ADIDNS zone.
         
         Returns:
-            True if wildcard record exists, False otherwise
+            True if it exists, False if not, None if the lookup failed
         """
-        result = self.get_node_attribute('*', 'dnsRecord', zone, partition)
-        return result is not None
+        dn = self._build_dn(zone or self.domain, partition, '*')
+        try:
+            return bool(self.ldap.query_raw(dn, '(objectClass=*)', ['dnsRecord'], scope=ldap3.BASE))
+        except Exception as e:
+            self.ldap.logger.debug(f"Wildcard lookup in {partition} failed: {e}")
+            return None
     
