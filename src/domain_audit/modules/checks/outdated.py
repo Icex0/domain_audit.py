@@ -422,47 +422,24 @@ class OutdatedChecker:
         self.logger.info("---Checking domain join permissions---")
         
         try:
-            domain = self.ldap.query(
-                search_base=self.base_dn,
-                search_filter='(objectClass=domain)',
-                attributes=['ms-DS-MachineAccountQuota']
-            )
-            if not domain:
-                return
-            quota = domain[0].get('ms-DS-MachineAccountQuota')
-            quota = int(quota) if str(quota).lstrip('-').isdigit() else 10  # default 10
-            
+            from ...utils.user_rights import users_can_create_computers
+            result = users_can_create_computers(self.ldap, self.logger, self.domain,
+                                                self.username, self.password, self.hashes)
+            quota = result.quota
             if quota <= 0:
                 self.logger.success(f"[+] Users cannot join computers to domain (MachineAccountQuota = {quota})")
                 return
             
-            from ...utils.user_rights import DCUserRights
-            rights = DCUserRights(self.ldap, self.logger, self.domain, self.username, self.password, self.hashes)
-            dcs = self.ldap.query(
-                self.base_dn,
-                '(&(objectClass=computer)(userAccountControl:1.2.840.113556.1.4.803:=8192))',
-                ['sAMAccountName', 'dNSHostName', 'distinguishedName', 'objectSid', 'primaryGroupID', 'userAccountControl']
-            )
-            holders, sources, errors = set(), set(), []
-            for dc in dcs:
-                result = rights.holders(dc, 'SeMachineAccountPrivilege', None, {'S-1-5-11'})  # default: Authenticated Users
-                if result.error:
-                    errors.append(f"{dc.get('sAMAccountName', '')}: {result.error}")
-                    continue
-                holders |= result.sids
-                sources.add(result.source)
-            principals = rights.non_admin_principals(holders)
-            
             lines = [f"MachineAccountQuota: {quota}",
-                     f"Add workstations to domain (SeMachineAccountPrivilege) on DCs - source: {', '.join(sorted(sources)) or 'unknown'}"]
-            if principals:
+                     f"Add workstations to domain (SeMachineAccountPrivilege) on DCs - source: {', '.join(sorted(result.sources)) or 'unknown'}"]
+            if result.possible:
                 self.logger.finding(f"Normal users can add up to {quota} computer accounts to the domain "
-                                    f"({'; '.join(p.split(' - ')[0] for p in principals)})")
-                write_lines(lines + ["Non-admin principals holding the right:"] + [f"  {p}" for p in principals],
+                                    f"({'; '.join(p.split(' - ')[0] for p in result.principals)})")
+                write_lines(lines + ["Non-admin principals holding the right:"] + [f"  {p}" for p in result.principals],
                             self.output_paths['findings'] / 'authenticated_users_can_join_domain.txt')
-            elif errors:
+            elif result.possible is None:
                 self.logger.warning(f"[!] MachineAccountQuota is {quota}; who holds 'Add workstations to domain' could not be determined - verify manually")
-                write_lines(lines + errors, self.output_paths['checks'] / 'domain_join_verify.txt')
+                write_lines(lines + result.errors, self.output_paths['checks'] / 'domain_join_verify.txt')
             else:
                 self.logger.success(f"[+] MachineAccountQuota is {quota}, but only admins hold 'Add workstations to domain' on the DCs")
                 write_lines(lines, self.output_paths['checks'] / 'domain_join.txt')

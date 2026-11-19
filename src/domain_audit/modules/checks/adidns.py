@@ -37,7 +37,11 @@ def evaluate_create_child(sd_raw: bytes, principals: Dict[str, str]) -> Dict[str
 class ADIDNSChecker:
     """Checks for ADIDNS permissions and configuration."""
 
-    def __init__(self, ldap_conn: LDAPConnection, output_paths: Dict[str, Path], domain: str = None):
+    def __init__(self, ldap_conn: LDAPConnection, output_paths: Dict[str, Path], domain: str = None,
+                 username: str = None, password: str = None, hashes: str = None):
+        self.username = username
+        self.password = password
+        self.hashes = hashes
         self.ldap = ldap_conn
         self.output_paths = output_paths
         self.logger = get_logger()
@@ -111,14 +115,18 @@ class ADIDNSChecker:
 
                 allowed_sids = [sid for sid, ok in decisions.items() if ok]
                 allowed = [principals[sid] + f" ({sid})" for sid in allowed_sids]
+                lines = [f"Zone: {self.domain}",
+                         f"Partition: {partition}",
+                         f"DN: {zone_dn}",
+                         "Principals with CreateChild (dnsNode) on the zone:"] + [f"  - {a}" for a in allowed]
+                
+                if domain_sid and allowed_sids == [f'{domain_sid}-515']:
+                    # Only Domain Computers: the recommended hardening for secure dynamic
+                    # DNS. Only effective if normal users can't create computer accounts.
+                    return self._domain_computers_only(lines)
+                
                 if allowed:
                     self.logger.finding(f"Low-privileged principals can add DNS records (CreateChild): {', '.join(allowed)}")
-                    lines = [f"Zone: {self.domain}",
-                             f"Partition: {partition}",
-                             f"DN: {zone_dn}",
-                             "Principals with CreateChild (dnsNode) on the zone:"] + [f"  - {a}" for a in allowed]
-                    if domain_sid and allowed_sids == [f'{domain_sid}-515']:
-                        lines += [""] + self._domain_computers_context()
                     write_lines(lines, self.output_paths['findings'] / 'ADIDNS_authenticated_users.txt')
                     return True
 
@@ -132,36 +140,47 @@ class ADIDNSChecker:
             self.logger.error(f"[-] Error checking ADIDNS permissions: {e}")
             return None
 
-    def _domain_computers_context(self) -> list:
-        """Explain how a user gets a Domain Computers account, based on MachineAccountQuota.
+    def _domain_computers_only(self, lines) -> Optional[bool]:
+        """Only Domain Computers can add records (instead of Authenticated Users).
 
-        Granting CreateChild to Domain Computers (instead of Authenticated Users)
-        is a common hardening step for secure dynamic DNS registration. Any
-        computer account can still add records, and by default any user can
-        create one (ms-DS-MachineAccountQuota = 10, SeMachineAccountPrivilege for
-        Authenticated Users in the Default Domain Controllers Policy).
+        That stops normal users only when they can't create computer accounts
+        (MachineAccountQuota > 0 and SeMachineAccountPrivilege, see
+        utils.user_rights.users_can_create_computers). Any computer account an
+        attacker controls (e.g. a compromised host) can still add records.
+        Returns True/False/None like _check_adidns_permissions.
         """
-        quota = None
+        from ...utils.user_rights import users_can_create_computers
         try:
-            result = self.ldap.query(self.base_dn, '(objectClass=domainDNS)', ['ms-DS-MachineAccountQuota'])
-            if result and result[0].get('ms-DS-MachineAccountQuota') not in (None, '', []):
-                quota = int(result[0]['ms-DS-MachineAccountQuota'])
+            creation = users_can_create_computers(self.ldap, self.logger, self.domain,
+                                                  self.username, self.password, self.hashes)
         except Exception as e:
-            self.logger.debug(f"Could not read ms-DS-MachineAccountQuota: {e}")
-
-        lines = ["Only Domain Computers can add records (typical hardening for dynamic DNS registration).",
-                 "Any computer account can still add records over LDAP or secure dynamic DNS updates."]
-        if quota is None:
-            lines.append("ms-DS-MachineAccountQuota could not be read - if > 0, any user can create a computer account and abuse this.")
-            self.logger.warning("[!] Only Domain Computers can add DNS records - exploitable by any user if MachineAccountQuota > 0 (couldn't read it)")
-        elif quota > 0:
-            lines.append(f"ms-DS-MachineAccountQuota is {quota}: any user can create a computer account (e.g. addcomputer.py / Powermad) and use it to add DNS records.")
-            self.logger.warning(f"[!] Only Domain Computers can add DNS records, but MachineAccountQuota is {quota} - any user can create a computer account to do it")
-        else:
-            lines.append("ms-DS-MachineAccountQuota is 0: requires control of an existing computer account (e.g. a compromised host) or delegated computer creation rights.")
-            self.logger.info("[*] Only Domain Computers can add DNS records and MachineAccountQuota is 0 - requires control of a computer account")
-        return lines
-
+            self.logger.debug(f"Could not determine whether users can create computer accounts: {e}")
+            creation = None
+        
+        lines = lines + ["", "Only Domain Computers can add records (hardening for secure dynamic DNS registration)."]
+        if creation is not None and creation.possible:
+            self.logger.finding(
+                f"Only Domain Computers can add DNS records, but normal users can create computer accounts "
+                f"(MachineAccountQuota {creation.quota}) and use one to add records"
+            )
+            lines += [f"Bypass: MachineAccountQuota is {creation.quota} and 'Add workstations to domain' is held by: "
+                      f"{'; '.join(p.split(' - ')[0] for p in creation.principals)}",
+                      "Any user can create a computer account (e.g. addcomputer.py / Powermad) and use it to add DNS records."]
+            write_lines(lines, self.output_paths['findings'] / 'ADIDNS_authenticated_users.txt')
+            return True
+        if creation is not None and creation.possible is False:
+            self.logger.success("[+] Only Domain Computers can add DNS records and normal users can't create computer accounts")
+            self.logger.info("[*] Residual risk: any compromised computer account can still add DNS records")
+            write_lines(lines + ["Normal users can't create computer accounts (MachineAccountQuota / 'Add workstations to domain'), "
+                                 "so this requires control of an existing computer account."],
+                        self.output_paths['checks'] / 'ADIDNS_permissions.txt')
+            return False
+        self.logger.warning("[!] Only Domain Computers can add DNS records - verify whether normal users can create "
+                            "computer accounts (MachineAccountQuota / 'Add workstations to domain')")
+        write_lines(lines + ["Whether normal users can create computer accounts could not be determined - verify manually."],
+                    self.output_paths['checks'] / 'ADIDNS_permissions.txt')
+        return None
+    
     def _check_adidns_wildcard(self, can_create: Optional[bool]):
         """Check for ADIDNS wildcard record.
 

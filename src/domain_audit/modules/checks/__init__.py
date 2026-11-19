@@ -117,7 +117,8 @@ class SecurityChecker:
         self.user_attrs_checker = UserAttrsChecker(ldap_conn, output_paths)
         self.outdated_checker = OutdatedChecker(ldap_conn, output_paths, domain=domain,
                                                 username=username, password=password, hashes=hashes)
-        self.adidns_checker = ADIDNSChecker(ldap_conn, output_paths, domain=domain)
+        self.adidns_checker = ADIDNSChecker(ldap_conn, output_paths, domain=domain, username=username,
+                                            password=password, hashes=hashes)
         self.exchange_checker = ExchangeChecker(ldap_conn, output_paths)
         self.adcs_checker = ADCSChecker(ldap_conn, output_paths,
                                          server=ldap_conn.config.server,

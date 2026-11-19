@@ -226,3 +226,49 @@ class DCUserRights:
             allow_sids, source, certain = set(default_sids), 'Windows default for DCs (no GPO defines it)', False
         deny_sids = self.resolve(deny_res.value) if deny_res is not None and deny_res.status == 'configured' else set()
         return RightResult(allow_sids - deny_sids, source, certain)
+
+
+@dataclass
+class ComputerCreation:
+    """Whether normal users can create computer accounts (MachineAccountQuota path)."""
+    possible: Optional[bool]        # True / False / None (couldn't be determined)
+    quota: int
+    principals: List[str] = field(default_factory=list)
+    sources: Set[str] = field(default_factory=set)
+    errors: List[str] = field(default_factory=list)
+
+
+def users_can_create_computers(ldap_conn, logger, domain: str, username: str = None,
+                               password: str = None, hashes: str = None) -> ComputerCreation:
+    """A normal user can create computer accounts when ms-DS-MachineAccountQuota > 0
+    AND non-admins hold "Add workstations to domain" (SeMachineAccountPrivilege)
+    on the DCs - by default Authenticated Users via the Default Domain
+    Controllers Policy. Delegated create-computer rights on OUs aren't covered.
+    """
+    base_dn = ldap_conn.config.base_dn
+    result = ldap_conn.query(base_dn, '(objectClass=domain)', ['ms-DS-MachineAccountQuota'])
+    raw = result[0].get('ms-DS-MachineAccountQuota') if result else None
+    quota = int(raw) if str(raw).lstrip('-').isdigit() else 10  # default 10
+    if quota <= 0:
+        return ComputerCreation(False, quota)
+
+    rights = DCUserRights(ldap_conn, logger, domain, username, password, hashes)
+    dcs = ldap_conn.query(
+        base_dn,
+        '(&(objectClass=computer)(userAccountControl:1.2.840.113556.1.4.803:=8192))',
+        ['sAMAccountName', 'dNSHostName', 'distinguishedName', 'objectSid', 'primaryGroupID', 'userAccountControl']
+    )
+    holders, sources, errors = set(), set(), []
+    for dc in dcs:
+        res = rights.holders(dc, 'SeMachineAccountPrivilege', None, {'S-1-5-11'})  # default: Authenticated Users
+        if res.error:
+            errors.append(f"{dc.get('sAMAccountName', '')}: {res.error}")
+            continue
+        holders |= res.sids
+        sources.add(res.source)
+    principals = rights.non_admin_principals(holders)
+    if principals:
+        return ComputerCreation(True, quota, principals, sources, errors)
+    if errors:
+        return ComputerCreation(None, quota, [], sources, errors)
+    return ComputerCreation(False, quota, [], sources, errors)
