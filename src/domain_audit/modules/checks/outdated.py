@@ -24,11 +24,17 @@ from ...utils.output import write_csv, write_lines
 class OutdatedChecker:
     """Checks for outdated operating systems and inactive objects."""
     
-    def __init__(self, ldap_conn: LDAPConnection, output_paths: Dict[str, Path]):
+    def __init__(self, ldap_conn: LDAPConnection, output_paths: Dict[str, Path],
+                 domain: str = None, username: str = None, password: str = None,
+                 hashes: str = None):
         self.ldap = ldap_conn
         self.output_paths = output_paths
         self.logger = get_logger()
         self.base_dn = ldap_conn.config.base_dn
+        self.domain = domain or ldap_conn.config.domain
+        self.username = username
+        self.password = password
+        self.hashes = hashes
     
     def run_all_checks(self):
         """Run all Phase 6 checks."""
@@ -405,31 +411,61 @@ class OutdatedChecker:
             self.logger.error(f"[-] Error checking KRBTGT password: {e}")
     
     def _check_domain_join(self):
-        """Check who can join computers to domain."""
+        """Check whether normal users can add computer accounts to the domain.
+
+        A normal user can create computer accounts when ms-DS-MachineAccountQuota
+        is > 0 AND they hold "Add workstations to domain" (SeMachineAccountPrivilege)
+        on the DCs - by default Authenticated Users via the Default Domain
+        Controllers Policy. (Delegated create-computer rights on OUs are a separate
+        path, not checked here.)
+        """
         self.logger.info("---Checking domain join permissions---")
         
         try:
-            # Get domain policy - check ms-DS-MachineAccountQuota
             domain = self.ldap.query(
                 search_base=self.base_dn,
                 search_filter='(objectClass=domain)',
                 attributes=['ms-DS-MachineAccountQuota']
             )
+            if not domain:
+                return
+            quota = domain[0].get('ms-DS-MachineAccountQuota')
+            quota = int(quota) if str(quota).lstrip('-').isdigit() else 10  # default 10
             
-            if domain:
-                quota = domain[0].get('ms-DS-MachineAccountQuota', '10')  # Default is 10
-                if quota is None or quota == '':
-                    quota = 10
-                else:
-                    quota = int(quota) if str(quota).isdigit() else 10
-                
-                if quota == 0:
-                    self.logger.success("[+] Users cannot join computers to domain (quota = 0)")
-                elif quota >= 1:
-                    self.logger.finding(f"Authenticated users can join {quota} computers to domain")
-                    write_lines([f"MachineAccountQuota: {quota}"], self.output_paths['findings'] / 'authenticated_users_can_join_domain.txt')
-                else:
-                    self.logger.info(f"[*] MachineAccountQuota: {quota}")
+            if quota <= 0:
+                self.logger.success(f"[+] Users cannot join computers to domain (MachineAccountQuota = {quota})")
+                return
+            
+            from ...utils.user_rights import DCUserRights
+            rights = DCUserRights(self.ldap, self.logger, self.domain, self.username, self.password, self.hashes)
+            dcs = self.ldap.query(
+                self.base_dn,
+                '(&(objectClass=computer)(userAccountControl:1.2.840.113556.1.4.803:=8192))',
+                ['sAMAccountName', 'dNSHostName', 'distinguishedName', 'objectSid', 'primaryGroupID', 'userAccountControl']
+            )
+            holders, sources, errors = set(), set(), []
+            for dc in dcs:
+                result = rights.holders(dc, 'SeMachineAccountPrivilege', None, {'S-1-5-11'})  # default: Authenticated Users
+                if result.error:
+                    errors.append(f"{dc.get('sAMAccountName', '')}: {result.error}")
+                    continue
+                holders |= result.sids
+                sources.add(result.source)
+            principals = rights.non_admin_principals(holders)
+            
+            lines = [f"MachineAccountQuota: {quota}",
+                     f"Add workstations to domain (SeMachineAccountPrivilege) on DCs - source: {', '.join(sorted(sources)) or 'unknown'}"]
+            if principals:
+                self.logger.finding(f"Normal users can add up to {quota} computer accounts to the domain "
+                                    f"({'; '.join(p.split(' - ')[0] for p in principals)})")
+                write_lines(lines + ["Non-admin principals holding the right:"] + [f"  {p}" for p in principals],
+                            self.output_paths['findings'] / 'authenticated_users_can_join_domain.txt')
+            elif errors:
+                self.logger.warning(f"[!] MachineAccountQuota is {quota}; who holds 'Add workstations to domain' could not be determined - verify manually")
+                write_lines(lines + errors, self.output_paths['checks'] / 'domain_join_verify.txt')
+            else:
+                self.logger.success(f"[+] MachineAccountQuota is {quota}, but only admins hold 'Add workstations to domain' on the DCs")
+                write_lines(lines, self.output_paths['checks'] / 'domain_join.txt')
             
         except Exception as e:
             self.logger.error(f"[-] Error checking domain join permissions: {e}")
@@ -523,7 +559,7 @@ class OutdatedChecker:
             computers = self.ldap.query(
                 search_base=self.base_dn,
                 search_filter='(&(objectClass=computer)(userAccountControl=4128))',
-                attributes=['sAMAccountName', 'lastLogonTimestamp', 'pwdLastSet']
+                attributes=['sAMAccountName', 'lastLogonTimestamp', 'pwdLastSet', 'badPwdCount', 'msDS-ResultantPSO']
             )
             
             if not computers:
@@ -531,12 +567,14 @@ class OutdatedChecker:
                 return
             
             never_used, used = [], []
+            by_name = {}
             for comp in computers:
                 sam = comp.get('sAMAccountName', '')
                 if not sam:
                     continue
                 name = sam.rstrip('$')
                 entry = (name, name.lower()[:14])
+                by_name[name] = comp
                 last_logon = comp.get('lastLogonTimestamp')
                 if isinstance(last_logon, list):
                     last_logon = last_logon[0] if last_logon else None
@@ -549,23 +587,102 @@ class OutdatedChecker:
             write_lines([n for n, _ in all_entries], self.output_paths['checks'] / 'list_computers_Pre-Windows2000Computers.txt')
             write_lines([p for _, p in all_entries], self.output_paths['checks'] / 'list_computers_Pre-Windows2000Computers_pass.txt')
             
-            if never_used:
+            tested = self._test_prewindows2000_passwords(all_entries, by_name)
+            valid = [(n, p) for n, p in all_entries if tested.get(n, (None,))[0] == 'valid']
+            wrong = [n for n, _ in all_entries if tested.get(n, (None,))[0] == 'wrong']
+            unclear = [(n, tested[n][1]) for n, _ in all_entries if tested.get(n, (None,))[0] == 'error']
+            untested_never = [(n, p) for n, p in never_used if n not in tested]
+            untested_used = [(n, p) for n, p in used if n not in tested]
+            
+            if valid:
+                self.logger.finding(f"{len(valid)} pre-created computer accounts use their default password (lowercase computer name)")
+                write_lines([f"{n}$:{p}" for n, p in valid],
+                            self.output_paths['findings'] / 'Pre-Windows2000Computers_valid_password.txt')
+            if wrong:
+                self.logger.success(f"[+] {len(wrong)} pre-created computer accounts don't use the default password")
+            if unclear:
+                self.logger.warning(f"[!] {len(unclear)} pre-created computer accounts could not be tested - verify manually")
+                write_lines([f"{n}$: {reason}" for n, reason in unclear],
+                            self.output_paths['checks'] / 'Pre-Windows2000Computers_verify.txt')
+            if untested_never:
                 self.logger.finding(
-                    f"{len(never_used)} pre-created computer accounts never logged on - password is likely the "
+                    f"{len(untested_never)} untested pre-created computer accounts never logged on - password is likely the "
                     "lowercase computer name (pre-Windows 2000)"
                 )
-                write_lines([f"{n}$:{p}" for n, p in never_used],
+                write_lines([f"{n}$:{p}" for n, p in untested_never],
                             self.output_paths['findings'] / 'Pre-Windows2000Computers_never_logged_on.txt')
-            if used:
+            if untested_used:
                 self.logger.warning(
-                    f"[!] {len(used)} pre-created computer accounts have logged on before - the default password "
-                    "was probably changed, verify manually"
+                    f"[!] {len(untested_used)} untested pre-created computer accounts have logged on before - the default "
+                    "password was probably changed, verify manually"
                 )
-            self.logger.info("[*] Verify with: netexec ldap <dc> -u <user> -p <pass> -M pre2k "
-                             "(STATUS_NOLOGON_WORKSTATION_TRUST_ACCOUNT over SMB also means the password is valid)")
+            if untested_never or untested_used:
+                self.logger.info("[*] Verify with: netexec ldap <dc> -u <user> -p <pass> -M pre2k "
+                                 "(STATUS_NOLOGON_WORKSTATION_TRUST_ACCOUNT over SMB also means the password is valid)")
                 
         except Exception as e:
             self.logger.error(f"[-] Error checking Pre-Windows 2000 computers: {e}")
+    
+    def _test_prewindows2000_passwords(self, entries, by_name) -> Dict[str, tuple]:
+        """Try one Kerberos TGT request per candidate with the default password.
+
+        Same approach as NetExec's pre2k module, using impacket (already used for
+        roasting). Safeguards: no testing when the domain lockout threshold is 1;
+        accounts with a fine-grained password policy (unknown lockout) or whose
+        badPwdCount on this DC is one attempt away from lockout are skipped.
+        The request goes to the DC this tool reads LDAP from, because
+        badPwdCount is tracked per DC. Side effects: a failed attempt adds one
+        bad password count and a 4771 event; a success updates the account's
+        last logon time.
+
+        Returns {name: ('valid'|'wrong'|'error', reason)} for tested accounts.
+        """
+        results: Dict[str, tuple] = {}
+        if not entries:
+            return results
+        try:
+            from impacket.krb5 import constants
+            from impacket.krb5.kerberosv5 import getKerberosTGT, KerberosError
+            from impacket.krb5.types import Principal
+        except ImportError:
+            self.logger.warning("[!] impacket not available - pre-created computer passwords not tested")
+            return results
+        
+        threshold = 0
+        try:
+            policy = self.ldap.query(self.base_dn, '(objectClass=domainDNS)', ['lockoutThreshold'])
+            threshold = int(policy[0].get('lockoutThreshold') or 0) if policy else 0
+        except Exception as e:
+            self.logger.debug(f"Could not read lockoutThreshold: {e}")
+        if threshold == 1:
+            self.logger.warning("[!] Domain lockout threshold is 1 - not testing pre-created computer passwords")
+            return results
+        
+        domain = self.ldap.config.domain
+        kdc = self.ldap.config.server
+        self.logger.info(f"[*] Testing {len(entries)} pre-created computer account(s) with one Kerberos logon attempt each")
+        for name, password in entries:
+            comp = by_name.get(name, {})
+            if comp.get('msDS-ResultantPSO'):
+                self.logger.debug(f"Skipping {name}$: fine-grained password policy applies (lockout threshold unknown)")
+                continue
+            bad = int(comp.get('badPwdCount') or 0)
+            if threshold and bad >= threshold - 1:
+                self.logger.debug(f"Skipping {name}$: badPwdCount {bad} is close to the lockout threshold {threshold}")
+                continue
+            principal = Principal(f"{name}$", type=constants.PrincipalNameType.NT_PRINCIPAL.value)
+            try:
+                getKerberosTGT(principal, password, domain, b'', b'', None, kdc)
+                results[name] = ('valid', '')
+            except KerberosError as e:
+                code = e.getErrorCode()
+                if code == constants.ErrorCodes.KDC_ERR_PREAUTH_FAILED.value:
+                    results[name] = ('wrong', '')
+                else:
+                    results[name] = ('error', str(e))
+            except Exception as e:
+                results[name] = ('error', str(e))
+        return results
     
     def _is_inactive(self, last_logon, pwd_last_set, days=365):
         """Check if an account is inactive based on lastLogon and pwdLastSet.
