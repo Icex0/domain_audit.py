@@ -173,13 +173,23 @@ class NTLMChecker:
                           self.output_paths['findings'] / 'ntlmv1_supported.txt',
                           self.logger)
             elif gpo_settings:
-                # Found settings but all are secure
-                self.logger.success("[+] NTLMv1 is disabled (LmCompatibilityLevel >= 3)")
-                
-                output_lines = ["LmCompatibilityLevel Settings (Secure)", ""]
+                # All settings are >= 3, so no machine *sends* NTLMv1. Only level 5
+                # makes a DC *refuse* NTLMv1 (levels 3 and 4 still accept it).
+                accepting = [s for s in gpo_settings if s['lm_level'] < 5]
+                if accepting:
+                    levels = ', '.join(sorted({str(s['lm_level']) for s in accepting}))
+                    self.logger.warning(
+                        f"[!] LmCompatibilityLevel {levels} found: clients only send NTLMv2, but DCs at level < 5 "
+                        "still accept NTLMv1 authentication (verify which GPO applies to the DCs)"
+                    )
+                else:
+                    self.logger.success("[+] NTLMv1 is refused (LmCompatibilityLevel 5 in all GPOs)")
+
+                output_lines = ["LmCompatibilityLevel Settings", "",
+                                "Levels 3-5 only send NTLMv2; only level 5 makes a DC refuse NTLMv1.", ""]
                 for setting in gpo_settings:
                     output_lines.append(f"{setting['gpo_name']}: Level {setting['lm_level']} - {setting['description']}")
-                
+
                 write_file('\n'.join(output_lines),
                           self.output_paths['checks'] / 'ntlmv1_settings.txt',
                           self.logger)
@@ -222,18 +232,18 @@ class NTLMChecker:
                         os_name = dc.get('operatingSystem', 'Unknown')
                         dc_os_list.append(f"  - {dc_name}: {os_name}")
                     
-                    self.logger.info("[*] All DCs have secure OS defaults (level 3 - NTLMv2 only)")
-                    
+                    self.logger.info("[*] DCs use the OS default level 3: they only send NTLMv2, but still accept NTLMv1 (level 5 refuses it)")
+
                     output_lines = [
                         "No LmCompatibilityLevel GPO setting found.",
                         "",
-                        "Domain Controllers (all have secure defaults):"
+                        "Domain Controllers (OS default level 3):"
                     ]
                     output_lines.extend(dc_os_list)
                     output_lines.extend([
                         "",
                         "OS defaults:",
-                        "  - Server 2008 and newer: Level 3 (NTLMv2 only) - Secure",
+                        "  - Server 2008 and newer: Level 3 (sends NTLMv2 only, still accepts NTLMv1 - set 5 to refuse it)",
                         "  - Server 2003: Level 2 (NTLMv1 with v2 session) - Vulnerable",
                         "  - Server 2000/XP: Level 1 (NTLMv1) - Vulnerable",
                         "",
@@ -318,6 +328,8 @@ class NTLMChecker:
                         merged['restricted'] = True
                 if settings.get('audit_ntlm_domain') is not None:
                     merged['audit_ntlm_domain'] = settings['audit_ntlm_domain']
+                if settings.get('audit_receiving') is not None:
+                    merged['audit_receiving'] = settings['audit_receiving']
                 
                 if merged:
                     merged['gpo_name'] = gpo_name
@@ -350,7 +362,11 @@ class NTLMChecker:
                         desc = self._get_restrict_receiving_desc(val)
                         output_lines.append(f"  RestrictReceivingNTLMTraffic (Servers): {val} - {desc}")
                     if r.get('audit_ntlm_domain') is not None:
-                        output_lines.append(f"  AuditNTLMInDomain: {r['audit_ntlm_domain']}")
+                        val = r['audit_ntlm_domain']
+                        output_lines.append(f"  AuditNTLMInDomain (DC): {val} - {self._get_audit_ntlm_domain_desc(val)}")
+                    if r.get('audit_receiving') is not None:
+                        val = r['audit_receiving']
+                        output_lines.append(f"  AuditReceivingNTLMTraffic (Servers): {val} - {self._get_audit_receiving_desc(val)}")
                     output_lines.append("")
                 
                 write_file('\n'.join(output_lines),
@@ -439,53 +455,88 @@ class NTLMChecker:
             conn.logoff()
             
             # Check if LLMNR is disabled
-            llmnr_disabled = False
-            llmnr_gpos = []
+            disabling_gpos = [(name, guid) for name, guid, value in llmnr_settings if value == 0]
             
-            for gpo_name, gpo_guid, enabled in llmnr_settings:
-                llmnr_gpos.append((gpo_name, enabled))
-                if enabled == 0:  # 0 = disabled
-                    llmnr_disabled = True
-            
-            if llmnr_disabled:
-                self.logger.success("[+] LLMNR is disabled via GPO")
-                
-                output_lines = ["LLMNR Configuration", "=" * 50, ""]
-                for gpo_name, enabled in llmnr_gpos:
-                    status = "Disabled" if enabled == 0 else "Enabled"
-                    output_lines.append(f"{gpo_name}: EnableMulticast = {enabled} ({status})")
-                
-                write_file('\n'.join(output_lines),
-                          self.output_paths['checks'] / 'llmnr_disabled.txt',
-                          self.logger)
-            else:
+            if not disabling_gpos:
                 self.logger.warning("[!] No domain GPO disables LLMNR - vulnerable to Responder unless disabled via local GPO/registry/MDM (verify on host)")
-                
-                output_lines = [
-                    "LLMNR Not Disabled",
-                    "=" * 50,
-                    "",
-                    "No GPO found disabling LLMNR (Link-Local Multicast Name Resolution).",
-                    "",
-                    "RISK: LLMNR is commonly exploited for:",
-                    "  - Credential capture using Responder",
-                    "  - NTLM relay attacks",
-                    "  - Man-in-the-middle attacks on name resolution",
-                    "",
-                    "GPO to disable LLMNR:",
-                    "  Computer Configuration > Administrative Templates > Network > DNS Client",
-                    "  > Turn off multicast name resolution = Enabled",
-                    "",
-                    "Registry: HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows NT\\DNSClient",
-                    "  EnableMulticast = 0",
-                ]
-                
-                write_file('\n'.join(output_lines),
-                          self.output_paths['findings'] / 'llmnr_enabled.txt',
-                          self.logger)
+                self._write_llmnr_not_disabled()
+                return
+            
+            # A GPO only disables LLMNR where it's linked, not blocked, not
+            # security/WMI-filtered and not overridden - evaluate per computer.
+            values = {guid.upper(): value for _, guid, value in llmnr_settings}
+            try:
+                from ...utils.gpo_scope import GPOScope
+                scope = GPOScope(self.ldap, self.logger)
+                computers = self.ldap.query(
+                    search_base=self.base_dn,
+                    search_filter='(&(objectClass=computer)(!(userAccountControl:1.2.840.113556.1.4.803:=2)))',
+                    attributes=['sAMAccountName', 'distinguishedName', 'objectSid', 'primaryGroupID', 'userAccountControl']
+                )
+                results = {c.get('sAMAccountName', c['distinguishedName']): scope.effective_value(c, values) for c in computers}
+            except Exception as e:
+                self.logger.warning(f"[!] Could not evaluate where the LLMNR GPOs apply ({e}) - verify GPO scope manually")
+                write_file('\n'.join(["GPOs setting EnableMulticast (scope not evaluated):"] +
+                                      [f"  {n}: EnableMulticast = {v}" for n, _, v in llmnr_settings]),
+                           self.output_paths['checks'] / 'llmnr_gpos.txt', self.logger)
+                return
+            
+            disabled = sorted(n for n, r in results.items() if r.status == 'configured' and r.value == 0)
+            enabled = sorted(n for n, r in results.items()
+                             if r.status == 'not_configured' or (r.status == 'configured' and r.value != 0))
+            unclear = sorted((n, r) for n, r in results.items() if r.status in ('conflict', 'uncertain'))
+            
+            gpo_lines = [f"  {n}: EnableMulticast = {v} ({'disabled' if v == 0 else 'enabled'})" for n, _, v in llmnr_settings]
+            summary = [
+                "LLMNR Configuration (effective per computer)", "=" * 50, "",
+                "GPOs setting EnableMulticast:", *gpo_lines, "",
+                f"LLMNR disabled by GPO: {len(disabled)} computers",
+                f"LLMNR not disabled:    {len(enabled)} computers",
+                f"Needs verification:    {len(unclear)} computers",
+            ]
+            write_file('\n'.join(summary + ["", "Disabled on:"] + [f"  {n}" for n in disabled]),
+                       self.output_paths['checks'] / 'llmnr_disabled.txt', self.logger)
+            
+            if enabled:
+                self.logger.finding(f"LLMNR is not disabled by GPO on {len(enabled)} of {len(results)} enabled computers")
+                write_file('\n'.join(summary + ["", "LLMNR not disabled on (GPO not linked/applied, or EnableMulticast=1):"] +
+                                      [f"  {n}" for n in enabled]),
+                           self.output_paths['findings'] / 'llmnr_enabled.txt', self.logger)
+            else:
+                self.logger.success(f"[+] LLMNR is disabled via GPO on all {len(disabled)} computers that could be evaluated")
+            
+            if unclear:
+                self.logger.warning(f"[!] LLMNR GPO scope couldn't be determined for {len(unclear)} computers - verify manually")
+                write_file('\n'.join([f"{n}: {r.status} - {r.reason} ({', '.join(r.gpos)})" for n, r in unclear]),
+                           self.output_paths['checks'] / 'llmnr_verify.txt', self.logger)
                 
         except Exception as e:
             self.logger.error(f"[-] Error checking LLMNR/NBT-NS: {e}")
+    
+    def _write_llmnr_not_disabled(self):
+        """Write the finding for when no GPO disables LLMNR."""
+        output_lines = [
+            "LLMNR Not Disabled",
+            "=" * 50,
+            "",
+            "No GPO found disabling LLMNR (Link-Local Multicast Name Resolution).",
+            "",
+            "RISK: LLMNR is commonly exploited for:",
+            "  - Credential capture using Responder",
+            "  - NTLM relay attacks",
+            "  - Man-in-the-middle attacks on name resolution",
+            "",
+            "GPO to disable LLMNR:",
+            "  Computer Configuration > Administrative Templates > Network > DNS Client",
+            "  > Turn off multicast name resolution = Enabled",
+            "",
+            "Registry: HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows NT\\DNSClient",
+            "  EnableMulticast = 0",
+        ]
+        
+        write_file('\n'.join(output_lines),
+                  self.output_paths['findings'] / 'llmnr_enabled.txt',
+                  self.logger)
     
     def _get_llmnr_settings(self, conn) -> List[tuple]:
         """Get LLMNR settings from linked GPO Registry.pol files.
@@ -504,7 +555,7 @@ class NTLMChecker:
         
         try:
             policies_path = f"{self.domain}/Policies"
-            policies = conn.listPath('SYSVOL', policies_path)
+            policies = conn.listPath('SYSVOL', policies_path + '/*')
         except Exception as e:
             self.logger.debug(f"Could not list GPO policies: {e}")
             return results
@@ -568,7 +619,7 @@ class NTLMChecker:
         try:
             # List all GPO folders in SYSVOL
             policies_path = f"{self.domain}/Policies"
-            policies = conn.listPath('SYSVOL', policies_path)
+            policies = conn.listPath('SYSVOL', policies_path + '/*')
         except Exception as e:
             self.logger.debug(f"Could not list GPO policies: {e}")
             return results
@@ -630,7 +681,7 @@ class NTLMChecker:
         
         try:
             policies_path = f"{self.domain}/Policies"
-            policies = conn.listPath('SYSVOL', policies_path)
+            policies = conn.listPath('SYSVOL', policies_path + '/*')
         except Exception as e:
             self.logger.debug(f"Could not list GPO policies: {e}")
             return results
@@ -695,6 +746,9 @@ class NTLMChecker:
             elif value_lower == 'auditntlmindomain':
                 if reg_type == 4 and len(data) >= 4:
                     settings['audit_ntlm_domain'] = struct.unpack('<I', data[:4])[0]
+            elif value_lower == 'auditreceivingntlmtraffic':
+                if reg_type == 4 and len(data) >= 4:
+                    settings['audit_receiving'] = struct.unpack('<I', data[:4])[0]
             elif value_lower == 'restrictsendingntlmtraffic':
                 if reg_type == 4 and len(data) >= 4:
                     val = struct.unpack('<I', data[:4])[0]
@@ -808,12 +862,33 @@ class NTLMChecker:
     
     def _get_restrict_ntlm_domain_desc(self, value: int) -> str:
         """Get description for RestrictNTLMInDomain value."""
+        # Netlogon\Parameters\RestrictNTLMInDomain values (security option enum)
         descriptions = {
             0: "Disabled (allow all)",
-            1: "Deny domain accounts to domain servers",
-            2: "Deny domain accounts",
-            3: "Deny domain servers",
-            4: "Deny all"
+            1: "Deny for domain accounts to domain servers",
+            3: "Deny for domain accounts",
+            5: "Deny for domain servers",
+            7: "Deny all"
+        }
+        return descriptions.get(value, f"Unknown ({value})")
+    
+    def _get_audit_ntlm_domain_desc(self, value: int) -> str:
+        """Get description for AuditNTLMInDomain value (same encoding as RestrictNTLMInDomain)."""
+        descriptions = {
+            0: "Disabled",
+            1: "Enable for domain accounts to domain servers",
+            3: "Enable for domain accounts",
+            5: "Enable for domain servers",
+            7: "Enable all"
+        }
+        return descriptions.get(value, f"Unknown ({value})")
+    
+    def _get_audit_receiving_desc(self, value: int) -> str:
+        """Get description for AuditReceivingNTLMTraffic value."""
+        descriptions = {
+            0: "Disabled",
+            1: "Enable auditing for domain accounts",
+            2: "Enable auditing for all accounts"
         }
         return descriptions.get(value, f"Unknown ({value})")
     
@@ -852,6 +927,7 @@ class NTLMChecker:
               - restrict_sending: int
               - restrict_receiving: int
               - audit_ntlm_domain: int
+              - audit_receiving: int
         """
         from impacket.smbconnection import SessionError
         
@@ -860,7 +936,7 @@ class NTLMChecker:
         
         try:
             policies_path = f"{self.domain}/Policies"
-            policies = conn.listPath('SYSVOL', policies_path)
+            policies = conn.listPath('SYSVOL', policies_path + '/*')
         except Exception as e:
             self.logger.debug(f"Could not list GPO policies: {e}")
             return results
@@ -871,8 +947,8 @@ class NTLMChecker:
             'machine\\system\\currentcontrolset\\services\\netlogon\\parameters\\restrictntlmindomain': 'restrict_ntlm_domain',
             'machine\\system\\currentcontrolset\\control\\lsa\\msv1_0\\restrictsendingntlmtraffic': 'restrict_sending',
             'machine\\system\\currentcontrolset\\control\\lsa\\msv1_0\\restrictreceivingntlmtraffic': 'restrict_receiving',
-            'machine\\system\\currentcontrolset\\control\\lsa\\msv1_0\\auditreceivingntlmtraffic': 'audit_ntlm_domain',
-            'machine\\system\\currentcontrolset\\services\\netlogon\\parameters\\auditntlmauthenticationindomain': 'audit_ntlm_domain',
+            'machine\\system\\currentcontrolset\\control\\lsa\\msv1_0\\auditreceivingntlmtraffic': 'audit_receiving',
+            'machine\\system\\currentcontrolset\\services\\netlogon\\parameters\\auditntlmindomain': 'audit_ntlm_domain',
         }
         
         for policy in policies:
