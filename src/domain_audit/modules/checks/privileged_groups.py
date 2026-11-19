@@ -1,37 +1,66 @@
 """Privileged groups membership checks."""
 
-from typing import Dict, List, Optional
 from pathlib import Path
+from typing import Dict, List, Optional, Set
+
+from ldap3.utils.conv import escape_filter_chars
 
 from ...utils.logger import get_logger
 from ...utils.ldap import LDAPConnection
 from ...utils.output import write_lines
 
+# LDAP_MATCHING_RULE_IN_CHAIN - resolves nested group membership server-side
+IN_CHAIN = '1.2.840.113556.1.4.1941'
+
+
+# Groups that should not contain anyone besides Domain/Enterprise Admins.
+# 'sid' is a well-known SID, 'rid' is appended to the domain SID, 'name' is a
+# sAMAccountName lookup for groups without a fixed RID.
+PRIVILEGED_GROUPS = [
+    {'label': 'Account Operators', 'file': 'AccountOperators', 'sid': 'S-1-5-32-548',
+     'reason': 'can create/modify most users and groups and log on to DCs'},
+    {'label': 'Server Operators', 'file': 'ServerOperators', 'sid': 'S-1-5-32-549',
+     'reason': 'can log on to DCs and reconfigure/start services, which runs code as SYSTEM on a DC'},
+    {'label': 'Backup Operators', 'file': 'BackupOperators', 'sid': 'S-1-5-32-551',
+     'reason': 'can back up the registry and NTDS.dit of DCs and extract all domain hashes'},
+    {'label': 'Print Operators', 'file': 'PrintOperators', 'sid': 'S-1-5-32-550',
+     'reason': 'can log on to DCs and load printer drivers (SeLoadDriverPrivilege)'},
+    {'label': 'Remote Management Users', 'file': 'RemoteManagementUsers', 'sid': 'S-1-5-32-580',
+     'reason': 'can connect to DCs over WinRM'},
+    {'label': 'Hyper-V Administrators', 'file': 'HyperVAdministrators', 'sid': 'S-1-5-32-578',
+     'reason': 'have full control over Hyper-V on DCs, including virtual DCs and their disks'},
+    {'label': 'DNS Admins', 'file': 'DNSAdmins', 'name': 'DnsAdmins',
+     'reason': 'can make the DNS service on a DC load an arbitrary DLL as SYSTEM'},
+    {'label': 'Schema Admins', 'file': 'SchemaAdmins', 'rid': 518,
+     'reason': 'can modify the AD schema, including default security descriptors'},
+    {'label': 'Key Admins', 'file': 'KeyAdmins', 'rid': 526,
+     'reason': 'can write msDS-KeyCredentialLink on domain objects (shadow credentials)'},
+    {'label': 'Enterprise Key Admins', 'file': 'EnterpriseKeyAdmins', 'rid': 527,
+     'reason': 'can write msDS-KeyCredentialLink on objects forest-wide (shadow credentials)'},
+    {'label': 'Group Policy Creator Owners', 'file': 'GroupPolicyCreatorOwners', 'rid': 520,
+     'reason': 'can create GPOs; becomes a domain compromise path when combined with link rights'},
+]
+
+# Groups that only exist in the forest root domain
+FOREST_ROOT_ONLY_RIDS = {518, 519, 527}
+
 
 class PrivilegedGroupsChecker:
     """Checks for members of high privileged groups that shouldn't have non-admin members."""
-    
-    # Well-known SIDs for builtin groups
-    ACCOUNT_OPERATORS_SID = "S-1-5-32-548"
-    BACKUP_OPERATORS_SID = "S-1-5-32-551"
-    PRINT_OPERATORS_SID = "S-1-5-32-550"
-    REMOTE_MANAGEMENT_USERS_SID = "S-1-5-32-580"
-    HYPER_V_ADMINS_SID = "S-1-5-32-578"
-    
+
     def __init__(self, ldap_conn: LDAPConnection, output_paths: Dict[str, Path]):
         self.ldap = ldap_conn
         self.output_paths = output_paths
         self.logger = get_logger()
         self.base_dn = ldap_conn.config.base_dn
-        self._domain_sid = None
-        self._domain_admins_dn = None
-        self._enterprise_admins_dn = None
-    
+        self._domain_sid: Optional[str] = None
+        self._admin_dns: Set[str] = set()
+
     def _get_domain_sid(self) -> Optional[str]:
         """Get the domain SID."""
         if self._domain_sid:
             return self._domain_sid
-        
+
         try:
             results = self.ldap.query(
                 search_base=self.base_dn,
@@ -47,200 +76,121 @@ class PrivilegedGroupsChecker:
         except Exception as e:
             self.logger.error(f"[-] Error getting domain SID: {e}")
         return None
-    
-    def _get_privileged_group_dns(self):
-        """Get distinguished names of Domain Admins and Enterprise Admins."""
-        domain_sid = self._get_domain_sid()
-        if not domain_sid:
-            return
-        
-        try:
-            # Domain Admins: domain SID + -512
-            da_sid = f"{domain_sid}-512"
-            results = self.ldap.query(
-                search_base=self.base_dn,
-                search_filter=f'(objectSid={da_sid})',
-                attributes=['distinguishedName']
-            )
-            if results:
-                self._domain_admins_dn = results[0].get('distinguishedName', '')
-            
-            # Enterprise Admins: domain SID + -519
-            ea_sid = f"{domain_sid}-519"
-            results = self.ldap.query(
-                search_base=self.base_dn,
-                search_filter=f'(objectSid={ea_sid})',
-                attributes=['distinguishedName']
-            )
-            if results:
-                self._enterprise_admins_dn = results[0].get('distinguishedName', '')
-        except Exception as e:
-            self.logger.error(f"[-] Error getting privileged group DNs: {e}")
-    
-    def _get_group_members_by_sid(self, sid: str) -> List[Dict]:
-        """Get members of a group by its SID, excluding Domain/Enterprise Admins."""
-        try:
-            # First get the group DN by SID
-            results = self.ldap.query(
-                search_base=self.base_dn,
-                search_filter=f'(objectSid={sid})',
-                attributes=['distinguishedName', 'sAMAccountName']
-            )
-            
-            if not results:
-                return []
-            
-            group_dn = results[0].get('distinguishedName', '')
-            if not group_dn:
-                return []
-            
-            return self._get_group_members(group_dn)
-        except Exception as e:
-            self.logger.error(f"[-] Error getting group members by SID {sid}: {e}")
-            return []
-    
-    def _get_group_members_by_name(self, name: str) -> List[Dict]:
-        """Get members of a group by its name, excluding Domain/Enterprise Admins."""
-        try:
-            results = self.ldap.query(
-                search_base=self.base_dn,
-                search_filter=f'(&(objectClass=group)(sAMAccountName={name}))',
-                attributes=['distinguishedName', 'sAMAccountName']
-            )
-            
-            if not results:
-                return []
-            
-            group_dn = results[0].get('distinguishedName', '')
-            if not group_dn:
-                return []
-            
-            return self._get_group_members(group_dn)
-        except Exception as e:
-            self.logger.error(f"[-] Error getting group members by name {name}: {e}")
-            return []
-    
-    def _get_group_members(self, group_dn: str) -> List[Dict]:
-        """Get user members of a group, excluding Domain/Enterprise Admins."""
-        members = []
-        
-        try:
-            # Query for users who are members of the group (recursive via LDAP_MATCHING_RULE_IN_CHAIN)
-            results = self.ldap.query(
-                search_base=self.base_dn,
-                search_filter=f'(&(objectClass=user)(!(objectClass=computer))(memberOf:1.2.840.113556.1.4.1941:={group_dn}))',
-                attributes=['sAMAccountName', 'memberOf', 'distinguishedName']
-            )
-            
-            if not results:
-                return []
-            
-            # Filter out users who are members of Domain Admins or Enterprise Admins
-            for user in results:
-                member_of = user.get('memberOf', [])
-                if isinstance(member_of, str):
-                    member_of = [member_of]
-                
-                is_privileged_admin = False
-                for group in member_of:
-                    if self._domain_admins_dn and self._domain_admins_dn in group:
-                        is_privileged_admin = True
-                        break
-                    if self._enterprise_admins_dn and self._enterprise_admins_dn in group:
-                        is_privileged_admin = True
-                        break
-                
-                if not is_privileged_admin:
-                    members.append(user)
-            
-            return members
-        except Exception as e:
-            self.logger.error(f"[-] Error getting group members for {group_dn}: {e}")
-            return []
-    
+
+    def _find_group(self, group: Dict) -> Optional[Dict]:
+        """Look up a group definition from PRIVILEGED_GROUPS (or a SID/RID) in LDAP."""
+        if 'sid' in group:
+            search_filter = f"(objectSid={group['sid']})"
+        elif 'rid' in group:
+            domain_sid = self._get_domain_sid()
+            if not domain_sid:
+                return None
+            search_filter = f"(objectSid={domain_sid}-{group['rid']})"
+        else:
+            search_filter = f"(&(objectClass=group)(sAMAccountName={escape_filter_chars(group['name'])}))"
+
+        results = self.ldap.query(
+            search_base=self.base_dn,
+            search_filter=search_filter,
+            attributes=['distinguishedName', 'sAMAccountName', 'member']
+        )
+        return results[0] if results else None
+
+    def _get_transitive_members(self, group_dn: str) -> List[Dict]:
+        """Return all direct and nested members (users, groups, computers, FSPs) of a group."""
+        return self.ldap.query(
+            search_base=self.base_dn,
+            search_filter=f'(memberOf:{IN_CHAIN}:={escape_filter_chars(group_dn)})',
+            attributes=['sAMAccountName', 'cn', 'distinguishedName', 'objectClass']
+        )
+
+    def _load_admin_dns(self):
+        """Collect DNs of Domain Admins, Enterprise Admins and all their (nested) members."""
+        self._admin_dns = set()
+        for rid in (512, 519):
+            try:
+                group = self._find_group({'rid': rid})
+                if not group:
+                    continue
+                group_dn = group.get('distinguishedName', '')
+                if not group_dn:
+                    continue
+                self._admin_dns.add(group_dn.lower())
+                for member in self._get_transitive_members(group_dn):
+                    dn = member.get('distinguishedName', '')
+                    if dn:
+                        self._admin_dns.add(dn.lower())
+            except Exception as e:
+                self.logger.error(f"[-] Error resolving Domain/Enterprise Admins (RID {rid}): {e}")
+
+    @staticmethod
+    def _object_type(member: Dict) -> str:
+        classes = member.get('objectClass', [])
+        if isinstance(classes, str):
+            classes = [classes]
+        classes = [c.lower() for c in classes]
+        if 'computer' in classes:
+            return 'computer'
+        if 'group' in classes:
+            return 'group'
+        if 'foreignsecurityprincipal' in classes:
+            return 'foreign principal'
+        if 'user' in classes:
+            return 'user'
+        return classes[-1] if classes else 'unknown'
+
     def check_privileged_groups(self):
         """Run all privileged group membership checks."""
         self.logger.info("---Checking if there are members in high privileged groups---")
-        
-        # Initialize privileged group DNs for filtering
-        self._get_privileged_group_dns()
-        
-        # Check each privileged group
-        self._check_account_operators()
-        self._check_backup_operators()
-        self._check_print_operators()
-        self._check_dns_admins()
-        self._check_schema_admins()
-    
-    def _check_account_operators(self):
-        """Check for non-admin members in Account Operators group."""
-        members = self._get_group_members_by_sid(self.ACCOUNT_OPERATORS_SID)
-        filepath = self.output_paths['checks'] / 'users_highprivilegegroups_AccountOperators.txt'
-        
-        if members:
-            count = len(members)
-            self.logger.finding(f"{count} users in the Account Operators group that aren't Domain- or Enterprise Administrators")
-            names = [m.get('sAMAccountName', '') for m in members if m.get('sAMAccountName')]
-            write_lines(names, filepath)
-        else:
-            self.logger.success("[+] There are no users in the Account Operators group")
-    
-    def _check_backup_operators(self):
-        """Check for non-admin members in Backup Operators group."""
-        members = self._get_group_members_by_sid(self.BACKUP_OPERATORS_SID)
-        filepath = self.output_paths['checks'] / 'users_highprivilegegroups_BackupOperators.txt'
-        
-        if members:
-            count = len(members)
-            self.logger.finding(f"{count} users in the Backup Operators group that aren't Domain- or Enterprise Administrators")
-            names = [m.get('sAMAccountName', '') for m in members if m.get('sAMAccountName')]
-            write_lines(names, filepath)
-        else:
-            self.logger.success("[+] There are no users in the Backup Operators group")
-    
-    def _check_print_operators(self):
-        """Check for non-admin members in Print Operators group."""
-        members = self._get_group_members_by_sid(self.PRINT_OPERATORS_SID)
-        filepath = self.output_paths['checks'] / 'users_highprivilegegroups_PrintOperators.txt'
-        
-        if members:
-            count = len(members)
-            self.logger.finding(f"{count} users in the Print Operators group that aren't Domain- or Enterprise Administrators")
-            names = [m.get('sAMAccountName', '') for m in members if m.get('sAMAccountName')]
-            write_lines(names, filepath)
-        else:
-            self.logger.success("[+] There are no users in the Print Operators group")
-    
-    def _check_dns_admins(self):
-        """Check for non-admin members in DNS Admins group."""
-        # DNS Admins doesn't have a well-known SID, search by name
-        members = self._get_group_members_by_name("DnsAdmins")
-        filepath = self.output_paths['checks'] / 'users_highprivilegegroups_DNSAdmins.txt'
-        
-        if members:
-            count = len(members)
-            self.logger.finding(f"{count} users in the DNS Admins group that aren't Domain- or Enterprise Administrators")
-            names = [m.get('sAMAccountName', '') for m in members if m.get('sAMAccountName')]
-            write_lines(names, filepath)
-        else:
-            self.logger.success("[+] There are no users in the DNS Admins group")
-    
-    def _check_schema_admins(self):
-        """Check for non-admin members in Schema Admins group."""
-        domain_sid = self._get_domain_sid()
-        if not domain_sid:
-            self.logger.error("[-] Could not get domain SID for Schema Admins check")
+
+        self._load_admin_dns()
+        for group in PRIVILEGED_GROUPS:
+            self._check_group(group)
+
+    def _check_group(self, group: Dict):
+        """Report members of a privileged group that aren't Domain/Enterprise Admins."""
+        label = group['label']
+        try:
+            group_obj = self._find_group(group)
+            if not group_obj:
+                if group.get('rid') in FOREST_ROOT_ONLY_RIDS:
+                    self.logger.info(f"[*] {label} group not found (it only exists in the forest root domain)")
+                else:
+                    self.logger.info(f"[*] {label} group not found")
+                return
+
+            group_dn = group_obj.get('distinguishedName', '')
+            direct = group_obj.get('member') or []
+            if isinstance(direct, str):
+                direct = [direct]
+            direct_dns = {dn.lower() for dn in direct}
+
+            members = []
+            for member in self._get_transitive_members(group_dn):
+                dn = member.get('distinguishedName', '')
+                if not dn or dn.lower() in self._admin_dns:
+                    continue
+                members.append(member)
+        except Exception as e:
+            self.logger.error(f"[-] Error checking {label} membership: {e}")
             return
-        
-        # Schema Admins: domain SID + -518
-        schema_admins_sid = f"{domain_sid}-518"
-        members = self._get_group_members_by_sid(schema_admins_sid)
-        filepath = self.output_paths['checks'] / 'users_highprivilegegroups_SchemaAdmins.txt'
-        
-        if members:
-            count = len(members)
-            self.logger.finding(f"{count} users in the Schema Admins group that aren't Domain- or Enterprise Administrators")
-            names = [m.get('sAMAccountName', '') for m in members if m.get('sAMAccountName')]
-            write_lines(names, filepath)
-        else:
-            self.logger.success("[+] There are no users in the Schema Admins group")
+
+        if not members:
+            self.logger.success(f"[+] There are no members in the {label} group that aren't Domain- or Enterprise Administrators")
+            return
+
+        self.logger.finding(
+            f"{len(members)} members in the {label} group that aren't Domain- or Enterprise Administrators"
+        )
+        lines = [
+            f"Group: {label} ({group_dn})",
+            f"Risk: members {group['reason']}",
+            "",
+            "Members (excluding Domain/Enterprise Admins and their nested members):",
+        ]
+        for member in sorted(members, key=lambda m: (m.get('sAMAccountName') or m.get('cn') or '').lower()):
+            name = member.get('sAMAccountName') or member.get('cn') or member.get('distinguishedName')
+            membership = 'direct' if member['distinguishedName'].lower() in direct_dns else 'nested'
+            lines.append(f"  {name} ({self._object_type(member)}, {membership}) - {member['distinguishedName']}")
+
+        write_lines(lines, self.output_paths['findings'] / f"users_highprivilegegroups_{group['file']}.txt")

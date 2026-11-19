@@ -67,9 +67,11 @@ class SMBChecker:
             with self.target_files.temporary_targets(smb_hosts) as hosts_file:
                 self.logger.info(f"[*] Checking {len(smb_hosts)} SMB hosts for null session")
             
-                # Run netexec with null credentials (empty username and password)
-                # netexec smb <targets> -u '' -p ''
-                cmd = ['netexec', 'smb', str(hosts_file), '-u', '', '-p', '']
+                # Run netexec with null credentials (empty username and password) and
+                # try to enumerate. A null session *login* alone is not a finding: DCs
+                # accept it by default; what matters is whether it can enumerate data.
+                cmd = ['netexec', 'smb', str(hosts_file), '-u', '', '-p', '',
+                       '--shares', '--users', '--pass-pol']
             
                 self.logger.debug(f"[*] Running: {' '.join(cmd)}")
             
@@ -92,26 +94,21 @@ class SMBChecker:
             write_lines(output.split('\n'),
                        self.output_paths['data'] / 'netexec_null_session.txt')
             
-            # Parse for successful null sessions
-            # Look for lines with [+] indicating success or "STATUS_ACCESS_DENIED" for failures
-            null_session_hosts = []
-            
-            for line in output.split('\n'):
-                # netexec shows [+] for success, [-] for failure
-                # Success pattern: SMB  10.0.0.1  445  HOSTNAME  [+] \: 
-                if '[+]' in line and 'SMB' in line:
-                    ip_match = re.search(r'\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b', line)
-                    if ip_match:
-                        null_session_hosts.append(ip_match.group())
-            
-            null_session_hosts = sorted(set(null_session_hosts))
-            
-            if null_session_hosts:
-                self.logger.finding(f"{len(null_session_hosts)} hosts allow SMB null session")
-                write_lines(null_session_hosts,
-                           self.output_paths['findings'] / 'smb_null_session.txt')
+            login_hosts, enum_hosts = self._parse_null_session_output(output)
+            auth_only = sorted(login_hosts - set(enum_hosts))
+
+            if enum_hosts:
+                self.logger.finding(f"{len(enum_hosts)} hosts allow enumeration over an SMB null session")
+                write_lines(
+                    [f"{ip}: {', '.join(sorted(what))}" for ip, what in sorted(enum_hosts.items())],
+                    self.output_paths['findings'] / 'smb_null_session.txt'
+                )
             else:
-                self.logger.success("[+] No hosts allow SMB null session")
+                self.logger.success("[+] No hosts allow enumeration over an SMB null session")
+
+            if auth_only:
+                self.logger.info(f"[*] {len(auth_only)} hosts accept a null session login but returned no shares, users or password policy")
+                write_lines(auth_only, self.output_paths['checks'] / 'smb_null_session_login_only.txt')
                 
         except subprocess.TimeoutExpired:
             self.logger.error("[-] netexec null session check timed out")
@@ -120,6 +117,38 @@ class SMBChecker:
         except Exception as e:
             self.logger.error(f"[-] Error checking null session: {e}")
     
+    @staticmethod
+    def _parse_null_session_output(output: str):
+        """Parse netexec null session output.
+
+        Returns (login_hosts, enum_hosts): the set of IPs where the null login
+        succeeded, and a dict IP -> set of what could be enumerated (shares,
+        users, password policy). Strings match NetExec's smb protocol output.
+        """
+        ip_pattern = re.compile(r'\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b')
+        login_hosts: Set[str] = set()
+        enum_hosts: Dict[str, Set[str]] = {}
+
+        for line in re.sub(r'\x1b\[[0-9;]*m', '', output).split('\n'):
+            if 'SMB' not in line:
+                continue
+            ip_match = ip_pattern.search(line)
+            if not ip_match:
+                continue
+            ip = ip_match.group()
+
+            if '[+]' in line:
+                login_hosts.add(ip)
+            if 'Enumerated shares' in line:
+                enum_hosts.setdefault(ip, set()).add('shares')
+            users_match = re.search(r'Enumerated (\d+) local users', line)
+            if users_match and int(users_match.group(1)) > 0:
+                enum_hosts.setdefault(ip, set()).add(f"users ({users_match.group(1)})")
+            if 'Dumping password info for domain' in line:
+                enum_hosts.setdefault(ip, set()).add('password policy')
+
+        return login_hosts, enum_hosts
+
     def _check_guest_access(self, smb_hosts: List[str]):
         """Check for guest account access on SMB hosts using netexec."""
         self.logger.info("---Checking for SMB guest access---")
@@ -185,7 +214,19 @@ class SMBChecker:
             self.logger.error(f"[-] Error checking guest access: {e}")
     
     def _load_domain_admins(self) -> List[str]:
-        """Load domain admins from data file."""
+        """Get all (direct and nested) Domain Admins user members from LDAP.
+
+        Falls back to data/list_domainadmins.txt from the enumeration phase.
+        """
+        try:
+            from ..enumeration import ADEnumerator
+            enumerator = ADEnumerator(self.ldap, self.output_paths)
+            admins = enumerator.get_privileged_user_members(self.ldap.get_domain_sid(), 512)
+            if admins is not None:
+                return [a.lower() for a in admins]
+        except Exception as e:
+            self.logger.debug(f"Could not resolve Domain Admins via LDAP: {e}")
+        
         admins_file = self.output_paths['data'] / 'list_domainadmins.txt'
         if admins_file.exists():
             with open(admins_file, 'r') as f:

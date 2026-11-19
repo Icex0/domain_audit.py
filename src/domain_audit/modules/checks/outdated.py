@@ -5,6 +5,8 @@ from typing import Dict, List
 from pathlib import Path
 from datetime import date, datetime, timedelta
 
+from ldap3.utils.conv import escape_filter_chars
+
 from ...utils.logger import get_logger
 from ...utils.ldap import LDAPConnection
 from ...config import (
@@ -12,6 +14,7 @@ from ...config import (
     WIN10_EOS_VERSIONS,
     WIN10_LONG_TERM_SUPPORT,
     WIN10_VERSION_NAMES,
+    WIN11_EDITION_LIFECYCLE,
     WIN11_EOS_VERSIONS,
     WIN11_VERSION_NAMES,
 )
@@ -82,6 +85,17 @@ class OutdatedChecker:
             return date.today() <= date.fromisoformat(release['end_date'])
         return False
 
+    @staticmethod
+    def _is_win11_eos(os: str, build: str) -> bool:
+        """Return True if this Windows 11 build/edition is past its end of servicing."""
+        if build in WIN11_EOS_VERSIONS:
+            return True
+        os_lower = os.lower()
+        for release in WIN11_EDITION_LIFECYCLE.get(build, []):
+            if any(marker.lower() in os_lower for marker in release['markers']):
+                return date.today() > date.fromisoformat(release['end_date'])
+        return False
+
     def _check_outdated_computers(self):
         """Check for EOL operating systems in AD."""
         self.logger.info("---Checking for EOL operating systems---")
@@ -90,7 +104,7 @@ class OutdatedChecker:
             computers = self.ldap.query(
                 search_base=self.base_dn,
                 search_filter='(objectClass=computer)',
-                attributes=['sAMAccountName', 'operatingSystem', 'operatingSystemVersion', 'lastLogon']
+                attributes=['sAMAccountName', 'operatingSystem', 'operatingSystemVersion', 'lastLogonTimestamp']
             )
             
             if not computers:
@@ -135,7 +149,7 @@ class OutdatedChecker:
                 version = comp.get('operatingSystemVersion') or ''
                 if 'Windows 11' in os:
                     build = self._extract_os_build(version)
-                    if build in WIN11_EOS_VERSIONS:
+                    if self._is_win11_eos(os, build):
                         readable = WIN11_VERSION_NAMES.get(build, build)
                         comp['operatingSystemVersion'] = version.replace(build, readable)
                         win11_eos.append(comp)
@@ -162,13 +176,15 @@ class OutdatedChecker:
             computers = self.ldap.query(
                 search_base=self.base_dn,
                 search_filter='(objectClass=computer)',
-                attributes=['sAMAccountName', 'pwdLastSet', 'lastLogon']
+                attributes=['sAMAccountName', 'pwdLastSet', 'lastLogonTimestamp']
             )
             
-            # Filter in Python
+            # Filter in Python. lastLogonTimestamp is replicated to all DCs (updated
+            # with up to ~14 days lag); lastLogon is per-DC and not replicated, so a
+            # logon at another DC would look like no logon at all.
             inactive_computers = []
             for comp in computers:
-                last_logon = comp.get('lastLogon')
+                last_logon = comp.get('lastLogonTimestamp')
                 pwd_last_set = comp.get('pwdLastSet')
                 # Check if either is old enough
                 if self._is_inactive(last_logon, pwd_last_set, 365):
@@ -184,13 +200,13 @@ class OutdatedChecker:
             users = self.ldap.query(
                 search_base=self.base_dn,
                 search_filter='(&(objectCategory=person)(objectClass=user)(!(userAccountControl:1.2.840.113556.1.4.803:=2)))',
-                attributes=['sAMAccountName', 'pwdLastSet', 'lastLogon']
+                attributes=['sAMAccountName', 'pwdLastSet', 'lastLogonTimestamp']
             )
             
             # Filter in Python
             inactive_users = []
             for user in users:
-                last_logon = user.get('lastLogon')
+                last_logon = user.get('lastLogonTimestamp')
                 pwd_last_set = user.get('pwdLastSet')
                 if self._is_inactive(last_logon, pwd_last_set, 365):
                     inactive_users.append(user)
@@ -209,26 +225,30 @@ class OutdatedChecker:
         self.logger.info("---Checking privileged objects security---")
         
         try:
-            # Get users with adminCount=1
+            # Enabled users with adminCount=1. Disabled accounts can't authenticate, and
+            # krbtgt / RODC krbtgt_<n> accounts (adminCount=1, always disabled) are
+            # excluded explicitly: they can't be in Protected Users or be delegated.
             privileged = self.ldap.query(
                 search_base=self.base_dn,
-                search_filter='(&(objectCategory=person)(objectClass=user)(adminCount=1))',
-                attributes=['sAMAccountName', 'memberOf', 'userAccountControl', 'pwdLastSet']
+                search_filter=(
+                    '(&(objectCategory=person)(objectClass=user)(adminCount=1)'
+                    '(!(userAccountControl:1.2.840.113556.1.4.803:=2))'
+                    '(!(sAMAccountName=krbtgt))(!(sAMAccountName=krbtgt_*)))'
+                ),
+                attributes=['sAMAccountName', 'distinguishedName', 'userAccountControl', 'pwdLastSet']
             )
-            
+
             if not privileged:
-                self.logger.info("[*] No privileged users found")
+                self.logger.info("[*] No enabled privileged users found")
                 return
-            
-            # Check if privileged users are in Protected Users group
-            not_protected = []
-            for user in privileged:
-                member_of = user.get('memberOf') or []
-                if isinstance(member_of, str):
-                    member_of = [member_of]
-                if not any('CN=Protected Users' in g for g in member_of):
-                    not_protected.append(user)
-            
+
+            # Check if privileged users are in Protected Users group (direct or nested)
+            protected_dns = self._get_protected_users_dns()
+            not_protected = [
+                u for u in privileged
+                if (u.get('distinguishedName') or '').lower() not in protected_dns
+            ]
+
             if not_protected:
                 self.logger.finding(f"{len(not_protected)} privileged users NOT in Protected Users group")
                 names = [u.get('sAMAccountName', '') for u in not_protected if u.get('sAMAccountName')]
@@ -236,21 +256,22 @@ class OutdatedChecker:
             else:
                 self.logger.success("[+] All privileged users are in Protected Users group")
             
-            # Check NOT_DELEGATED flag (0x100000 = 1048576)
+            # Check NOT_DELEGATED flag (0x100000 = 1048576). Protected Users members
+            # can't be delegated anyway, so they don't need the flag.
             not_delegated = []
-            for user in privileged:
+            for user in not_protected:
                 uac = user.get('userAccountControl', 0)
                 if isinstance(uac, str):
                     uac = int(uac)
                 if not (uac & 1048576):
                     not_delegated.append(user)
-            
+
             if not_delegated:
-                self.logger.finding(f"{len(not_delegated)} privileged users without NOT_DELEGATED flag")
+                self.logger.finding(f"{len(not_delegated)} privileged users can be delegated (no NOT_DELEGATED flag and not in Protected Users)")
                 names = [u.get('sAMAccountName', '') for u in not_delegated if u.get('sAMAccountName')]
                 write_lines(names, self.output_paths['findings'] / 'administrators_delegation_flag.txt')
             else:
-                self.logger.success("[+] All privileged users have NOT_DELEGATED flag")
+                self.logger.success("[+] All privileged users are protected from delegation (NOT_DELEGATED flag or Protected Users)")
             
             # Check computers in high privileged groups
             high_priv_groups = self.ldap.query(
@@ -287,6 +308,29 @@ class OutdatedChecker:
         except Exception as e:
             self.logger.error(f"[-] Error checking privileged objects: {e}")
     
+    def _get_protected_users_dns(self) -> set:
+        """Return lowercased DNs of all direct and nested members of Protected Users (RID 525)."""
+        try:
+            domain_sid = self.ldap.get_domain_sid()
+            group = self.ldap.query(
+                search_base=self.base_dn,
+                search_filter=f'(objectSid={domain_sid}-525)',
+                attributes=['distinguishedName']
+            )
+            if not group or not group[0].get('distinguishedName'):
+                self.logger.info("[*] Protected Users group not found (requires Windows Server 2012 R2 domain functional level)")
+                return set()
+            group_dn = escape_filter_chars(group[0]['distinguishedName'])
+            members = self.ldap.query(
+                search_base=self.base_dn,
+                search_filter=f'(memberOf:1.2.840.113556.1.4.1941:={group_dn})',
+                attributes=['distinguishedName']
+            )
+            return {m['distinguishedName'].lower() for m in members if m.get('distinguishedName')}
+        except Exception as e:
+            self.logger.error(f"[-] Error resolving Protected Users members: {e}")
+            return set()
+
     def _check_privileged_old_passwords(self):
         """Check if privileged users have passwords older than 180 days."""
         self.logger.info("---Checking if privileged users have password older than 180 days---")
@@ -463,37 +507,62 @@ class OutdatedChecker:
             self.logger.error(f"[-] Error checking ANONYMOUS LOGON group membership: {e}")
     
     def _check_prewindows2000_computers(self):
-        """Generate lists for Pre-Windows 2000 computer password spraying."""
+        """Find pre-created "pre-Windows 2000" computer accounts and their likely password.
+
+        Pre-created computer accounts have userAccountControl exactly 4128
+        (WORKSTATION_TRUST_ACCOUNT | PASSWD_NOTREQD) - the same filter NetExec's
+        pre2k module uses. When created with "Assign this computer account as a
+        pre-Windows 2000 computer", the password is the lowercase computer name
+        without '$', truncated to 14 characters. After the first logon the
+        password is normally changed, so accounts that never logged on are the
+        likely hits.
+        """
         self.logger.info("---Checking Pre-Windows 2000 computers---")
         
         try:
             computers = self.ldap.query(
                 search_base=self.base_dn,
-                search_filter='(objectClass=computer)',
-                attributes=['sAMAccountName']
+                search_filter='(&(objectClass=computer)(userAccountControl=4128))',
+                attributes=['sAMAccountName', 'lastLogonTimestamp', 'pwdLastSet']
             )
             
             if not computers:
-                self.logger.info("[*] No computers found")
+                self.logger.success("[+] No pre-created (pre-Windows 2000) computer accounts found")
                 return
             
-            # Extract computer names (remove $)
-            names = [c.get('sAMAccountName', '').rstrip('$') for c in computers if c.get('sAMAccountName')]
-            write_lines(names, self.output_paths['checks'] / 'list_computers.txt')
-            
-            # Generate potential passwords (first 14 chars, lowercase)
-            passwords = []
-            for name in names:
-                name_lower = name.lower()
-                if len(name_lower) > 14:
-                    passwords.append(name_lower[:14])
+            never_used, used = [], []
+            for comp in computers:
+                sam = comp.get('sAMAccountName', '')
+                if not sam:
+                    continue
+                name = sam.rstrip('$')
+                entry = (name, name.lower()[:14])
+                last_logon = comp.get('lastLogonTimestamp')
+                if isinstance(last_logon, list):
+                    last_logon = last_logon[0] if last_logon else None
+                if last_logon and not (isinstance(last_logon, datetime) and last_logon.year == 1601):
+                    used.append(entry)
                 else:
-                    passwords.append(name_lower)
+                    never_used.append(entry)
             
-            write_lines(passwords, self.output_paths['checks'] / 'list_computers_Pre-Windows2000Computers_pass.txt')
+            all_entries = never_used + used
+            write_lines([n for n, _ in all_entries], self.output_paths['checks'] / 'list_computers_Pre-Windows2000Computers.txt')
+            write_lines([p for _, p in all_entries], self.output_paths['checks'] / 'list_computers_Pre-Windows2000Computers_pass.txt')
             
-            self.logger.info(f"[*] Generated {len(passwords)} potential passwords for Pre-Windows 2000 computer spraying")
-            self.logger.info("[*] Check for STATUS_NOLOGON_WORKSTATION_TRUST_ACCOUNT error")
+            if never_used:
+                self.logger.finding(
+                    f"{len(never_used)} pre-created computer accounts never logged on - password is likely the "
+                    "lowercase computer name (pre-Windows 2000)"
+                )
+                write_lines([f"{n}$:{p}" for n, p in never_used],
+                            self.output_paths['findings'] / 'Pre-Windows2000Computers_never_logged_on.txt')
+            if used:
+                self.logger.warning(
+                    f"[!] {len(used)} pre-created computer accounts have logged on before - the default password "
+                    "was probably changed, verify manually"
+                )
+            self.logger.info("[*] Verify with: netexec ldap <dc> -u <user> -p <pass> -M pre2k "
+                             "(STATUS_NOLOGON_WORKSTATION_TRUST_ACCOUNT over SMB also means the password is valid)")
                 
         except Exception as e:
             self.logger.error(f"[-] Error checking Pre-Windows 2000 computers: {e}")
@@ -524,7 +593,7 @@ class OutdatedChecker:
                     last_logon = int(last_logon) if last_logon else 0
                 # Convert LDAP timestamp to datetime
                 if last_logon and last_logon != 0:
-                    ldap_epoch = datetime(1601, 1, 1)
+                    ldap_epoch = datetime(1601, 1, 1, tzinfo=timezone.utc)
                     last_logon_dt = ldap_epoch + timedelta(seconds=last_logon / 10000000)
                 else:
                     last_logon_dt = None
@@ -538,7 +607,7 @@ class OutdatedChecker:
                     pwd_last_set = re.sub(r'[^0-9]', '', pwd_last_set)[:18]
                     pwd_last_set = int(pwd_last_set) if pwd_last_set else 0
                 if pwd_last_set and pwd_last_set != 0:
-                    ldap_epoch = datetime(1601, 1, 1)
+                    ldap_epoch = datetime(1601, 1, 1, tzinfo=timezone.utc)
                     pwd_last_set_dt = ldap_epoch + timedelta(seconds=pwd_last_set / 10000000)
                 else:
                     pwd_last_set_dt = None
@@ -588,7 +657,7 @@ class OutdatedChecker:
                 return False
             
             # LDAP epoch is 1601-01-01, convert to datetime
-            ldap_epoch = datetime(1601, 1, 1)
+            ldap_epoch = datetime(1601, 1, 1, tzinfo=timezone.utc)
             
             # Convert LDAP timestamp (100-nanosecond intervals) to datetime
             seconds = pwd_last_set / 10000000

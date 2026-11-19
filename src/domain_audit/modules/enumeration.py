@@ -9,6 +9,7 @@ from ..utils.logger import get_logger
 from ..utils.ldap import LDAPConnection, LDAPConfig
 from ..utils.output import write_csv, write_lines
 from ..core.exceptions import EnumerationError
+from ldap3.utils.conv import escape_filter_chars
 
 
 @dataclass
@@ -175,8 +176,35 @@ class ADEnumerator:
         return dcs
     
 
+    def get_privileged_user_members(self, domain_sid: str, rid: int) -> Optional[List[str]]:
+        """Return sAMAccountNames of all users in a privileged group (by RID),
+        including nested members and users with it as primary group.
+
+        Returns None if the group doesn't exist in this domain.
+        """
+        group_result = self.ldap.query(
+            search_base=self.base_dn,
+            search_filter=f'(objectSid={domain_sid}-{rid})',
+            attributes=['distinguishedName']
+        )
+        if not group_result or not group_result[0].get('distinguishedName'):
+            return None
+        group_dn = escape_filter_chars(group_result[0]['distinguishedName'])
+        # memberOf with LDAP_MATCHING_RULE_IN_CHAIN resolves nested groups;
+        # primary group membership (primaryGroupID) isn't stored in memberOf.
+        members = self.ldap.query(
+            search_base=self.base_dn,
+            search_filter=(
+                f'(&(objectCategory=person)(objectClass=user)'
+                f'(|(memberOf:1.2.840.113556.1.4.1941:={group_dn})(primaryGroupID={rid})))'
+            ),
+            attributes=['sAMAccountName']
+        )
+        return sorted({m['sAMAccountName'] for m in members if m.get('sAMAccountName')}, key=str.lower)
+
     def enumerate_privileged_group_members(self, domain_sid: str) -> dict:
-        """Enumerate members of Domain Admins and Enterprise Admins groups.
+        """Enumerate effective user members (direct and nested) of Domain Admins
+        and Enterprise Admins and write them to list_<group>.txt.
         
         Returns:
             Dict mapping group name to member count
@@ -184,69 +212,15 @@ class ADEnumerator:
         self.logger.log_verbose("Enumerating Domain Admins and Enterprise Admins members")
         member_counts = {}
         
-        # Well-known RIDs for privileged groups
-        privileged_groups = {
-            'Domain Admins': f"{domain_sid}-512",
-            'Enterprise Admins': f"{domain_sid}-519"
-        }
-        
-        for group_name, group_sid in privileged_groups.items():
+        for group_name, rid in (('Domain Admins', 512), ('Enterprise Admins', 519)):
             try:
-                # Get the group with its member attribute
-                group_result = self.ldap.query(
-                    search_base=self.base_dn,
-                    search_filter=f'(objectSid={group_sid})',
-                    attributes=['distinguishedName', 'sAMAccountName', 'member']
-                )
-                
-                if not group_result:
+                usernames = self.get_privileged_user_members(domain_sid, rid)
+                if usernames is None:
                     self.logger.warning(f"[!] Could not find {group_name} group")
                     continue
-                
-                # Get direct members from the member attribute
-                member_dns = group_result[0].get('member', [])
-                if isinstance(member_dns, str):
-                    member_dns = [member_dns]
-                
-                # Resolve each member DN to get sAMAccountName
-                usernames = []
-                for member_dn in member_dns:
-                    if not member_dn:
-                        continue
-                    try:
-                        self.logger.log_verbose(f"Resolving member: {member_dn}")
-                        member = self.ldap.query(
-                            search_base=member_dn,
-                            search_filter='(objectClass=*)',
-                            attributes=['sAMAccountName', 'objectClass']
-                        )
-                        if member and member[0].get('sAMAccountName'):
-                            self.logger.log_verbose(f"  Resolved to: {member[0]['sAMAccountName']} (type: {member[0].get('objectClass')})")
-                            usernames.append(member[0]['sAMAccountName'])
-                        else:
-                            self.logger.log_verbose(f"  No sAMAccountName found, using CN fallback")
-                            # If we can't resolve, extract CN from DN
-                            if member_dn.startswith('CN='):
-                                cn = member_dn.split(',')[0][3:]
-                                usernames.append(cn)
-                    except Exception as e:
-                        self.logger.log_verbose(f"  Error resolving member: {e}")
-                        # If we can't resolve, extract CN from DN
-                        if member_dn.startswith('CN='):
-                            cn = member_dn.split(',')[0][3:]
-                            usernames.append(cn)
-                
-                # Save to text file in data folder
                 safe_name = group_name.replace(' ', '').lower()
-                filepath = self.output_paths['data'] / f'list_{safe_name}.txt'
-                
-                if usernames:
-                    write_lines(usernames, filepath)
-                else:
-                    # Write empty file if no members found
-                    write_lines([], filepath)
+                write_lines(usernames, self.output_paths['data'] / f'list_{safe_name}.txt')
                 member_counts[group_name] = len(usernames)
-                    
             except Exception as e:
                 self.logger.error(f"[-] Error enumerating {group_name}: {e}")
                 member_counts[group_name] = 0

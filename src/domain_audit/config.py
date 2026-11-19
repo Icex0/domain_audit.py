@@ -113,8 +113,23 @@ WIN10_LONG_TERM_SUPPORT = [
     },
 ]
 
-# Windows 11 End of Service versions (build numbers)
+# Windows 11 End of Service versions (build numbers) - out of support for every edition
 WIN11_EOS_VERSIONS = ['22000', '22621', '22631']
+
+# Windows 11 builds whose end of servicing differs per edition.
+# The operatingSystem string is matched against each entry's markers in order and
+# the first match wins, so more specific editions must come first ("Pro Education"
+# contains "Education" but follows the Home/Pro lifecycle). Builds/editions with no
+# matching entry are not flagged.
+# Source: https://learn.microsoft.com/en-us/windows/release-health/windows11-release-information
+WIN11_EDITION_LIFECYCLE = {
+    '26100': [  # 24H2 (also Enterprise LTSC 2024 / IoT Enterprise LTSC 2024)
+        {'markers': ['IoT Enterprise LTSC'], 'end_date': '2034-10-10'},
+        {'markers': ['LTSC'], 'end_date': '2029-10-09'},
+        {'markers': ['Pro Education', 'Pro for Workstations', 'Pro', 'Home'], 'end_date': '2026-10-13'},
+        {'markers': ['Enterprise', 'Education'], 'end_date': '2027-10-12'},
+    ],
+}
 
 WIN11_VERSION_NAMES = {
     '22000': '21H2',
