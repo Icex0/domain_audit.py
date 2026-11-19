@@ -163,7 +163,8 @@ Checks report what was actually verified: confirmed issues go to `findings/`, ca
 - SCCM System Management container detection
 
 **Backup**
-- Veeam Backup & Replication server joined to the domain (`VeeamBackupSvc` SPN on a computer or service account, confirmed by testing TCP 9392; Veeam advises against joining it to the production domain)
+- Veeam Backup & Replication server joined to the domain (`VeeamBackupSvc` SPN on a computer or service account, or TCP 9392 open on a Veeam infrastructure host; Veeam advises against joining it to the production domain)
+- Domain-joined Veeam proxies/repositories (`VeeamTransportSvc`/`VeeamDeploySvc`) for review: backups on a domain-joined repository are reachable from the domain
 
 **Group Policy (evaluated per computer)**
 

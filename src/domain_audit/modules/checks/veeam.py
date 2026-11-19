@@ -26,6 +26,9 @@ from ...utils.ldap import LDAPConnection
 from ...utils.output import write_lines
 
 BACKUP_SERVER_SERVICE = 'veeambackupsvc'
+# Veeam Data Mover (proxy, Windows repository, backup server) and Installer Service
+# (managed servers). VeeamGuestHelperSvc alone marks a machine that is backed up.
+INFRASTRUCTURE_SERVICES = {'veeamtransportsvc', 'veeamdeploysvc'}
 VEEAM_BACKUP_SERVICE_PORT = 9392
 UAC_ACCOUNTDISABLE = 0x2
 
@@ -98,7 +101,7 @@ class VeeamChecker:
             self.logger.error(f"[-] Error checking for Veeam SPNs: {e}")
             return
 
-        servers, accounts, disabled, other = [], [], [], []
+        servers, accounts, disabled, infrastructure, other = [], [], [], [], []
         for obj in objects:
             spns = [s for s in _as_list(obj.get('servicePrincipalName')) if str(s).lower().startswith('veeam')]
             if not spns:
@@ -117,13 +120,16 @@ class VeeamChecker:
                 'type': 'computer' if is_computer else 'user',
                 'spns': sorted(spns),
             }
-            if any(s.split('/')[0].lower() == BACKUP_SERVER_SERVICE for s in spns):
+            services = {s.split('/')[0].lower() for s in spns}
+            if BACKUP_SERVER_SERVICE in services:
                 if is_disabled:
                     disabled.append(entry)
                 elif is_computer:
                     servers.append(entry)
                 else:
                     accounts.append(entry)
+            elif services & INFRASTRUCTURE_SERVICES and is_computer and not is_disabled:
+                infrastructure.append(entry)
             else:
                 other.append(entry)
 
@@ -138,11 +144,22 @@ class VeeamChecker:
         for entry in servers + accounts:
             self._confirm(entry)
 
+        # A proxy/repository host with TCP 9392 open is the backup server itself whose
+        # VeeamBackupSvc SPN was not registered.
+        for entry in list(infrastructure):
+            self._confirm(entry)
+            if entry['confirmed']:
+                entry['probe'].append("no VeeamBackupSvc SPN; identified as backup server by the open port")
+                infrastructure.remove(entry)
+                servers.append(entry)
+            else:
+                entry['probe'] = [r.replace('not confirmed: ', 'backup server port check: ') for r in entry['probe']]
+
         if servers or accounts:
             names = [f"{e['name']} ({'confirmed, port 9392 open' if e['confirmed'] else 'not confirmed'})"
                      for e in servers + accounts]
             self.logger.finding(f"Veeam Backup & Replication server joined to the domain: {', '.join(names)}")
-            lines = ["Veeam Backup & Replication (VeeamBackupSvc SPN) found in the domain:"]
+            lines = ["Veeam Backup & Replication server found in the domain (VeeamBackupSvc SPN or TCP 9392):"]
             if servers:
                 lines += ["", "Backup server computer object(s):"] + fmt(servers)
             if accounts:
@@ -172,12 +189,35 @@ class VeeamChecker:
                         fmt(disabled),
                         self.output_paths['checks'] / 'Veeam_disabled_backup_server_objects.txt')
 
+        if infrastructure:
+            self.logger.warning(f"[!] Domain-joined Veeam infrastructure (proxy or repository): "
+                                f"{', '.join(e['name'] for e in infrastructure)} - verify whether it stores backups")
+            write_lines([
+                "Domain-joined Veeam infrastructure servers (VeeamTransportSvc = Data Mover, used by",
+                "backup proxies and Windows repositories; VeeamDeploySvc = Installer Service on",
+                "managed servers):"] + fmt(infrastructure) + [
+                "",
+                "SPNs do not show whether a host is a proxy or a repository. If it is a backup",
+                "repository, the backups are stored on a domain-joined server: anyone who compromises",
+                "the domain can delete or encrypt them, even when the backup server itself is not",
+                "domain-joined. A proxy only moves data and is lower risk.",
+                "",
+                "Verify the role in the Veeam console (Backup Infrastructure > Backup Repositories)",
+                "or with the administrator. Recommendation: keep repositories outside the production",
+                "domain (workgroup, management forest or a hardened Linux repository) and keep",
+                "immutable or offline copies of the backups.",
+            ], self.output_paths['checks'] / 'Veeam_domain_joined_infrastructure.txt')
+
         if other:
-            self.logger.info(f"[*] {len(other)} object(s) with other Veeam SPNs (Veeam in use; saved to data)")
-            write_lines(["Objects with Veeam SPNs other than VeeamBackupSvc (e.g. backed-up machines,",
-                         "proxies). Informational: shows Veeam is in use.", ""] + fmt(other),
+            self.logger.info(f"[*] {len(other)} object(s) with other Veeam SPNs (e.g. backed-up machines; saved to data)")
+            write_lines(["Objects with other Veeam SPNs (VeeamGuestHelperSvc = machine backed up with",
+                         "application-aware processing). Informational: shows Veeam is in use.", ""] + fmt(other),
                         self.output_paths['data'] / 'veeam_spns.txt')
 
         if not servers and not accounts:
-            self.logger.success("[+] No domain-joined Veeam Backup & Replication server found (VeeamBackupSvc SPN); "
-                                "note that SPN registration can fail or be disabled")
+            if infrastructure or other:
+                self.logger.info("[*] Veeam is in use, but no Veeam Backup & Replication server was found in this "
+                                 "domain (recommended: workgroup or management domain); verify where it runs")
+            else:
+                self.logger.success("[+] No Veeam SPNs found in the domain (note that SPN registration can fail "
+                                    "or be disabled)")
