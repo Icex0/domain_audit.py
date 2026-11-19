@@ -3,6 +3,7 @@
 import configparser
 import os
 import re
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
@@ -274,12 +275,51 @@ class AccessChecker:
         else:
             self.logger.success("[+] There are no systems where the current user has access over WINRM")
     
+    def _netexec_confirms_rdp_logon(self) -> Optional[bool]:
+        """Whether the installed NetExec only marks RDP pwn3d after a real logon.
+
+        NetExec releases up to at least v1.5.1 mark every successful RDP
+        connection as pwn3d, which only proves the credentials are valid.
+        Since Nov 2026 (main, PR #1486) NetExec waits for the Save Session Info
+        PDU via rdp.login_and_confirm(). Detect that by importing NetExec with
+        its own interpreter (from the netexec launcher's shebang).
+        Returns True/False, or None if it can't be determined.
+        """
+        if hasattr(self, '_rdp_confirm_cache'):
+            return self._rdp_confirm_cache
+        result = None
+        try:
+            launcher = shutil.which('netexec') or shutil.which('nxc')
+            if launcher:
+                with open(launcher, 'rb') as f:
+                    first = f.readline().decode(errors='ignore').strip()
+                if first.startswith('#!') and 'python' in first:
+                    python = first[2:].strip().split()[0]
+                    # nxc/protocols has both an rdp/ package and rdp.py (NetExec loads
+                    # the module by path), so locate the package and read rdp.py.
+                    probe = subprocess.run(
+                        [python, '-c', 'import nxc, os; print(os.path.dirname(nxc.__file__))'],
+                        capture_output=True, text=True, timeout=30
+                    )
+                    rdp_py = Path(probe.stdout.strip().splitlines()[-1]) / 'protocols' / 'rdp.py' \
+                        if probe.returncode == 0 and probe.stdout.strip() else None
+                    if rdp_py and rdp_py.is_file():
+                        result = 'def login_and_confirm' in rdp_py.read_text(errors='ignore') \
+                            or 'async def login_and_confirm' in rdp_py.read_text(errors='ignore')
+        except Exception as e:
+            self.logger.debug(f"Could not determine NetExec RDP logon confirmation support: {e}")
+        self._rdp_confirm_cache = result
+        return result
+    
     def _check_rdp_access(self):
         """Check where the current user can log on over RDP.
 
-        NetExec's RDP pwn3d label means an interactive session was opened
-        (Save Session Info PDU received), i.e. the user has the RDP logon right
-        (e.g. via Remote Desktop Users) - it does not mean local admin.
+        The RDP pwn3d label is only a reliable "can log on" signal with a NetExec
+        that confirms the interactive logon (see _netexec_confirms_rdp_logon) and
+        on hosts with NLA enabled. Older NetExec marks any valid credentials as
+        pwn3d, and with NLA off the connection completes before Windows checks
+        the logon. Those results are reported for manual verification.
+        It never means local admin.
         """
         self.logger.info("---Checking for RDP logon access---")
         
@@ -298,15 +338,35 @@ class AccessChecker:
         # Debug: show raw output
         self.logger.debug(f"Raw netexec RDP output:\n{output}")
         
-        # Check for RDP logon access (pwn3d label = interactive session opened)
         results = self._parse_pwn3d_output(output)
-
-        if results:
-            formatted = self._format_results(results)
+        nla_off_ips = {ip for ip, _ in self._parse_nla_disabled(output)}
+        confirms = self._netexec_confirms_rdp_logon()
+        
+        confirmed, unverified = [], []
+        for ip, hostname in results:
+            if confirms is not True:
+                reason = ("installed NetExec marks any valid credentials as pwn3d on RDP" if confirms is False
+                          else "could not determine whether the installed NetExec confirms the RDP logon")
+                unverified.append((ip, hostname, reason))
+            elif ip in nla_off_ips:
+                unverified.append((ip, hostname, "NLA disabled - the logon itself isn't verified"))
+            else:
+                confirmed.append((ip, hostname))
+        
+        if confirmed:
+            formatted = self._format_results(confirmed)
             self.logger.finding(f"There are {len(formatted)} systems where the current user can log on over RDP")
             write_lines(formatted, self.output_paths['findings'] / 'access_rdp.txt')
-        else:
+        elif not unverified:
             self.logger.success("[+] There are no systems where the current user can log on over RDP")
+        
+        if unverified:
+            self.logger.warning(
+                f"[!] RDP accepted the credentials on {len(unverified)} systems, but whether the user can actually "
+                "log on couldn't be confirmed - verify manually (e.g. xfreerdp)"
+            )
+            write_lines([f"{ip} ({hostname}): {reason}" for ip, hostname, reason in unverified],
+                        self.output_paths['checks'] / 'access_rdp_verify.txt')
         
         # Check for NLA disabled
         self.logger.info("---Checking for RDP NLA configuration---")
