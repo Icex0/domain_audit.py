@@ -3,6 +3,7 @@
 Uses netexec to check LDAP signing and channel binding.
 """
 
+import io
 import subprocess
 import re
 from typing import Dict, List
@@ -15,6 +16,8 @@ from impacket.dcerpc.v5 import transport, rprn
 from ...utils.logger import get_logger
 from ...utils.ldap import LDAPConnection
 from ...utils.output import write_lines
+from ...utils.gpp import find_cpasswords
+from ...utils.dc import select_reachable_dc
 from ...config import SYSVOL_PASSWORD_KEYWORDS, NETLOGON_PASSWORD_KEYWORDS
 
 
@@ -259,7 +262,13 @@ class LDAPChecker:
             findings_path.unlink(missing_ok=True)
     
     def _check_sysvol_passwords(self):
-        """Check for passwords in SYSVOL share using impacket."""
+        """Check SYSVOL GPO folders for GPP cpasswords and password keywords.
+
+        Group Policy Preferences XML files sit several levels deep, e.g.
+        Policies/{GUID}/Machine/Preferences/Groups/Groups.xml, so the Policies
+        folder is walked recursively. SYSVOL is replicated between DCs, so one
+        reachable DC is scanned.
+        """
         self.logger.info("---Checking SYSVOL for passwords---")
         self.logger.info("[*] This might take a while")
         
@@ -275,90 +284,83 @@ class LDAPChecker:
                 search_filter='(&(objectClass=computer)(userAccountControl:1.2.840.113556.1.4.803:=8192))',
                 attributes=['dNSHostName', 'name']
             )
-            
             if not dcs:
                 self.logger.info("[*] No domain controllers found")
                 return
+            hostname = select_reachable_dc(dcs, fallback=self.server, logger=self.logger)
             
-            findings = []
+            conn = SMBConnection(hostname, hostname)
+            conn.login(self.username, self.password, self.domain)
             
-            for dc in dcs:
-                hostname = dc.get('dNSHostName', '')
-                name = dc.get('name', '')
-                
-                if not hostname:
+            gpp_findings = []
+            keyword_hits = []
+            xml_count = 0
+            for file_path in self._walk_share(conn, 'SYSVOL', f"{self.domain}/Policies"):
+                if not file_path.lower().endswith('.xml'):
+                    continue
+                xml_count += 1
+                content = self._read_share_file(conn, 'SYSVOL', file_path)
+                if not content:
                     continue
                 
-                self.logger.info(f"[*] Checking SYSVOL of {name}")
+                for entry in find_cpasswords(content):
+                    password = entry['password'] or f"<could not decrypt: {entry['cpassword']}>"
+                    gpp_findings.append(f"{file_path}: user '{entry['user'] or '?'}' password '{password}'")
                 
-                try:
-                    conn = SMBConnection(hostname, hostname)
-                    conn.login(self.username, self.password, self.domain)
-                    
-                    # Connect to SYSVOL share
-                    conn.connectTree('SYSVOL')
-                    
-                    # Search for XML files with password patterns
-                    domain_folder = f"{self.domain}"
-                    policies_path = f"{domain_folder}/Policies"
-                    
-                    found_password = False
-                    
-                    try:
-                        # List policies folders
-                        files = conn.listPath('SYSVOL', policies_path + "/*")
-                        
-                        for file in files:
-                            if file.is_directory() and file.get_longname() not in ['.', '..']:
-                                policy_path = f"{policies_path}/{file.get_longname()}"
-                                try:
-                                    policy_files = conn.listPath('SYSVOL', policy_path + "/*")
-                                    
-                                    for pf in policy_files:
-                                        fname = pf.get_longname()
-                                        if fname.endswith('.xml'):
-                                            file_path = f"{policy_path}/{fname}"
-                                            try:
-                                                # Read file content
-                                                tid = conn.connectTree('SYSVOL')
-                                                fid = conn.openFile(tid, file_path)
-                                                content = conn.readFile(tid, fid)
-                                                conn.closeFile(tid, fid)
-                                                
-                                                if content:
-                                                    content_lower = content.lower()
-                                                    for keyword in SYSVOL_PASSWORD_KEYWORDS:
-                                                        if keyword.encode() in content_lower:
-                                                            found_password = True
-                                                            findings.append(f"{name}: Found '{keyword}' in {file_path}")
-                                                            break
-                                                    
-                                            except Exception as e:
-                                                self.logger.debug(f"Error reading {file_path}: {e}")
-                                                
-                                except Exception as e:
-                                    self.logger.debug(f"Error listing {policy_path}: {e}")
-                                    
-                    except Exception as e:
-                        self.logger.debug(f"Error listing SYSVOL policies: {e}")
-                    
-                    conn.logoff()
-                    
-                    if found_password:
-                        self.logger.warning(f"[!] Possible passwords found in SYSVOL of {name}")
-                    else:
-                        self.logger.success(f"[+] No obvious passwords in SYSVOL of {name}")
-                        
-                except Exception as e:
-                    self.logger.error(f"[-] Error accessing SYSVOL on {hostname}: {e}")
+                content_lower = content.lower()
+                for keyword in SYSVOL_PASSWORD_KEYWORDS:
+                    if keyword.encode() in content_lower:
+                        keyword_hits.append(f"Found '{keyword}' in {file_path}")
+                        break
             
-            if findings:
-                write_lines(findings,
-                           self.output_paths['checks'] / 'sysvol_passwords.txt')
-                self.logger.warning("[!] Please manually check SYSVOL for passwords")
+            conn.logoff()
+            self.logger.info(f"[*] Scanned {xml_count} XML files in SYSVOL of {hostname}")
+            
+            if gpp_findings:
+                self.logger.finding(f"{len(gpp_findings)} Group Policy Preferences passwords (cpassword) found in SYSVOL")
+                write_lines(gpp_findings, self.output_paths['findings'] / 'sysvol_gpp_passwords.txt')
+            else:
+                self.logger.success("[+] No Group Policy Preferences passwords (cpassword) found in SYSVOL")
+            
+            if keyword_hits:
+                self.logger.warning(f"[!] {len(keyword_hits)} SYSVOL XML files contain password keywords - please check manually")
+                write_lines(keyword_hits, self.output_paths['checks'] / 'sysvol_passwords.txt')
                 
         except Exception as e:
             self.logger.error(f"[-] Error checking SYSVOL: {e}")
+    
+    def _walk_share(self, conn, share: str, path: str, depth: int = 0, max_depth: int = 12):
+        """Recursively yield file paths below path on an SMB share."""
+        if depth > max_depth:
+            return
+        try:
+            entries = conn.listPath(share, f"{path}/*")
+        except Exception as e:
+            self.logger.debug(f"Error listing {share}/{path}: {e}")
+            return
+        for entry in entries:
+            name = entry.get_longname()
+            if name in ('.', '..'):
+                continue
+            full_path = f"{path}/{name}"
+            if entry.is_directory():
+                yield from self._walk_share(conn, share, full_path, depth + 1, max_depth)
+            else:
+                yield full_path
+    
+    def _read_share_file(self, conn, share: str, path: str, max_size: int = 10 * 1024 * 1024) -> bytes:
+        """Read a file from an SMB share, returning b'' on error or if too large."""
+        buffer = io.BytesIO()
+        try:
+            def write(data):
+                if buffer.tell() + len(data) > max_size:
+                    raise ValueError("file too large")
+                buffer.write(data)
+            conn.getFile(share, path, write)
+            return buffer.getvalue()
+        except Exception as e:
+            self.logger.debug(f"Error reading {share}/{path}: {e}")
+            return b''
     
     def _check_netlogon_passwords(self):
         """Check for passwords in NETLOGON share using impacket."""
@@ -483,34 +485,43 @@ class LDAPChecker:
                 return
             
             spooler_enabled = []
-            
+            spooler_unknown = []
+
             for dc in dcs:
                 hostname = dc.get('dNSHostName', '')
                 name = dc.get('name', '')
-                
+
                 if not hostname:
                     continue
-                
-                try:
-                    # Check for MS-RPRN (Print Spooler) using impacket
-                    if self._check_spooler_rpc(hostname):
-                        self.logger.finding(f"PrintSpooler enabled on {name}")
-                        spooler_enabled.append(f"{name} ({hostname})")
-                    else:
-                        self.logger.success(f"[+] PrintSpooler disabled on {name}")
-                        
-                except Exception as e:
-                    self.logger.debug(f"Error checking {hostname}: {e}")
-            
+
+                # Check for MS-RPRN (Print Spooler) using impacket
+                status, detail = self._check_spooler_rpc(hostname)
+                if status is True:
+                    self.logger.finding(f"PrintSpooler enabled on {name}")
+                    spooler_enabled.append(f"{name} ({hostname})")
+                elif status is False:
+                    self.logger.success(f"[+] PrintSpooler disabled on {name}")
+                else:
+                    self.logger.warning(f"[!] PrintSpooler status unknown on {name}: {detail}")
+                    spooler_unknown.append(f"{name} ({hostname}): {detail}")
+
             if spooler_enabled:
                 write_lines(spooler_enabled,
                            self.output_paths['findings'] / 'printspooler_domaincontrollers.txt')
+            if spooler_unknown:
+                write_lines(spooler_unknown,
+                           self.output_paths['checks'] / 'printspooler_domaincontrollers_unknown.txt')
                                            
         except Exception as e:
             self.logger.error(f"[-] Error checking PrintSpooler: {e}")
     
-    def _check_spooler_rpc(self, target: str) -> bool:
-        """Check if Print Spooler RPC interface is available on target."""
+    def _check_spooler_rpc(self, target: str):
+        """Check if the Print Spooler RPC interface is available on target.
+
+        Returns (status, detail): status is True (running), False (not running:
+        the \\pipe\\spoolss named pipe doesn't exist) or None (unknown, e.g.
+        authentication failure, access denied or timeout).
+        """
         try:
             # MS-RPRN UUID (Print System Remote Protocol)
             MSRPRN_UUID = ('12345678-1234-abcd-ef00-0123456789ab', '1.0')
@@ -531,8 +542,12 @@ class LDAPChecker:
             
             # If we get here, spooler is running
             dce.disconnect()
-            return True
-            
+            return True, ''
+
         except Exception as e:
             self.logger.debug(f"Spooler check failed for {target}: {e}")
-            return False
+            # A stopped spooler removes the spoolss pipe, so opening it fails with
+            # STATUS_OBJECT_NAME_NOT_FOUND. Any other error doesn't tell us the state.
+            if 'STATUS_OBJECT_NAME_NOT_FOUND' in str(e):
+                return False, ''
+            return None, str(e) or type(e).__name__

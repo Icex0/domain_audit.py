@@ -42,9 +42,23 @@ def parse_gpttmpl_inf(content: bytes) -> Dict[str, Dict[str, str]]:
         if text.startswith('\ufeff'):
             text = text[1:]
 
-        # Parse as INI file
-        config = configparser.ConfigParser()
-        config.read_string(text)
+        # Parse as INI file. GptTmpl.inf isn't a strict INI file:
+        # - values contain '%' (e.g. %SystemRoot%), which breaks interpolation
+        # - [File Security]/[Registry Keys] lines have no '=' delimiter
+        # - keys/values contain ':' (SDDL strings), so only '=' is a delimiter
+        # - duplicate keys can occur
+        # Any of these made configparser raise and the whole file was discarded.
+        config = configparser.ConfigParser(
+            interpolation=None,
+            strict=False,
+            allow_no_value=True,
+            delimiters=('=',),
+        )
+        try:
+            config.read_string(text)
+        except configparser.ParsingError:
+            # Raised after the whole file was read; keep what parsed fine
+            pass
 
         for section in config.sections():
             result[section] = dict(config.items(section))
