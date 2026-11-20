@@ -1,6 +1,7 @@
 """SQL Server enumeration and checks using netexec."""
 
 import re
+import socket
 import subprocess
 from typing import Dict, List, Tuple
 from pathlib import Path
@@ -62,7 +63,9 @@ class SQLChecker:
                 all_outputs.append(f"=== {host} - enum_links ===")
                 all_outputs.append(links_output)
                 all_outputs.append("")
-                links = self._parse_links_output(links_output)
+                server_name = self._local_server_name(host, links_output)
+                links = [link for link in self._parse_links_output(links_output)
+                         if not self._is_local_server(link.replace('login mapping - ', ''), server_name)]
                 if links:
                     linked_servers.append({'host': host, 'links': links})
                 # Check for encryption disabled
@@ -252,9 +255,15 @@ class SQLChecker:
                 hostnames, logger=self.logger, label="MSSQL SPN host"
             ).targets
             for hostname in filtered_spns:
-                if hostname and hostname not in hosts:
-                    hosts.append(hostname)
-                    spn_hosts.append(hostname)
+                if not hostname or hostname in hosts:
+                    continue
+                # The port scan lists IPs; skip SPN hosts that are the same server
+                ip = self._resolve(hostname)
+                if ip and ip in hosts:
+                    self.logger.debug(f"{hostname} ({ip}) already found by the network scan")
+                    continue
+                hosts.append(hostname)
+                spn_hosts.append(hostname)
             
             if spn_hosts:
                 self.logger.info(f"[*] Found {len(spn_hosts)} additional MSSQL hosts from SPNs")
@@ -288,6 +297,37 @@ class SQLChecker:
         """True when the query returned 'xp_cmdshell:1'."""
         text = re.sub(r'\x1b\[[0-9;]*m', '', output)
         return bool(re.search(r'\bxp_cmdshell:1\b', text))
+
+    @staticmethod
+    def _resolve(hostname: str):
+        try:
+            return socket.gethostbyname(hostname)
+        except (socket.gaierror, UnicodeError, OSError):
+            return None
+
+    @staticmethod
+    def _server_name(output: str) -> str:
+        """SQL Server host name from NetExec's banner ('(name:ZB-SQL-02)')."""
+        match = re.search(r'\(name:([^)]+)\)', re.sub(r'\x1b\[[0-9;]*m', '', output))
+        return match.group(1).strip() if match else ''
+
+    def _local_server_name(self, host: str, links_output: str) -> str:
+        """Name of the local server entry that sp_linkedservers also returns.
+
+        @@SERVERNAME is HOST or HOST\\INSTANCE; NetExec's banner name (HOST) is
+        the fallback when the query can't be run.
+        """
+        output = self._run_netexec_query(host, "SELECT @@SERVERNAME AS servername")
+        match = re.search(r'\bservername:(\S+)', re.sub(r'\x1b\[[0-9;]*m', '', output or ''))
+        return match.group(1).strip() if match else self._server_name(links_output)
+
+    @staticmethod
+    def _is_local_server(link: str, server_name: str) -> bool:
+        """sp_linkedservers also returns the local server (sys.servers server_id 0),
+        named like @@SERVERNAME. Other instances on the same host are real links."""
+        if not server_name:
+            return False
+        return link.split(':', 1)[0].strip().upper() == server_name.upper()
 
     def _run_netexec_module(self, host: str, module: str) -> str:
         """Run a netexec module against a host."""
