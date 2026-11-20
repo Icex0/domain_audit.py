@@ -49,6 +49,7 @@ class SQLChecker:
         privesc_paths = []
         epa_not_required, epa_unverified = [], []
         logins = []
+        xp_cmdshell_enabled, sa_enabled = [], []
         
         # Collect all outputs for saving
         all_outputs = []
@@ -106,6 +107,15 @@ class SQLChecker:
                 all_outputs += [f"=== {host} - enum_logins ===", logins_output, ""]
                 for name, login_type, status in self._parse_logins_output(logins_output):
                     logins.append(f"{host}: {name} ({login_type}, {status})")
+                    if name.lower() == 'sa' and status == 'ENABLED' and host not in sa_enabled:
+                        sa_enabled.append(host)
+
+            # xp_cmdshell configuration (sys.configurations is readable by every login)
+            xp_output = self._run_netexec_query(host, self.XP_CMDSHELL_QUERY)
+            if xp_output:
+                all_outputs += [f"=== {host} - xp_cmdshell ===", xp_output, ""]
+                if self._parse_xp_cmdshell(xp_output):
+                    xp_cmdshell_enabled.append(host)
         
         # Save results
         if linked_servers:
@@ -178,6 +188,30 @@ class SQLChecker:
                 "and Force Encryption Yes."],
                 self.output_paths['checks'] / 'mssql_epa_unverified.txt')
 
+        if xp_cmdshell_enabled:
+            self.logger.finding(f"xp_cmdshell enabled on {len(xp_cmdshell_enabled)} MSSQL host(s): "
+                                f"{', '.join(xp_cmdshell_enabled)}")
+            write_lines([f"  - {h}" for h in xp_cmdshell_enabled] + [
+                "",
+                "xp_cmdshell is enabled (sys.configurations value_in_use = 1). Any login that gains",
+                "sysadmin, or has been granted EXECUTE on xp_cmdshell, can run operating system commands",
+                "as the SQL Server service account without changing the configuration first.",
+                "",
+                "Recommendation: disable xp_cmdshell (sp_configure 'xp_cmdshell', 0) unless required."],
+                self.output_paths['findings'] / 'mssql_xp_cmdshell_enabled.txt')
+
+        if sa_enabled:
+            self.logger.warning(f"[!] The 'sa' login is enabled on {len(sa_enabled)} MSSQL host(s) - "
+                                "check its password manually")
+            write_lines([f"  - {h}" for h in sa_enabled] + [
+                "",
+                "The built-in 'sa' login is enabled, so SQL Server authentication (mixed mode) is on and",
+                "'sa' is a known target for password guessing. Its password strength is not tested",
+                "automatically: with CHECK_POLICY on, guessing can lock the account out.",
+                "",
+                "Recommendation: disable or rename 'sa', or use Windows authentication only."],
+                self.output_paths['checks'] / 'mssql_sa_enabled.txt')
+
         if logins:
             self.logger.info(f"[*] {len(logins)} SQL Server login(s) visible to the current user (saved to data)")
             write_lines(["SQL Server logins visible to the current user (NetExec enum_logins). A low-privileged",
@@ -229,6 +263,32 @@ class SQLChecker:
         
         return hosts
     
+    XP_CMDSHELL_QUERY = ("SELECT CONVERT(INT, value_in_use) AS xp_cmdshell FROM sys.configurations "
+                         "WHERE name = 'xp_cmdshell'")
+
+    def _run_netexec_query(self, host: str, query: str) -> str:
+        """Run a read-only query with netexec -q (output: 'xp_cmdshell:<value>')."""
+        cmd = ['netexec', 'mssql', host, '-u', self.username]
+        cmd += ['-H', self.hashes] if self.hashes and not self.password else ['-p', self.password]
+        cmd += ['-q', query]
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8',
+                                    errors='replace', timeout=30)
+            return (result.stdout or '') + (result.stderr or '')
+        except subprocess.TimeoutExpired:
+            self.logger.error(f"[-] netexec MSSQL query timed out for {host}")
+        except FileNotFoundError:
+            self.logger.error("[-] netexec not found on system")
+        except Exception as e:
+            self.logger.error(f"[-] Error running netexec MSSQL query for {host}: {e}")
+        return ""
+
+    @staticmethod
+    def _parse_xp_cmdshell(output: str) -> bool:
+        """True when the query returned 'xp_cmdshell:1'."""
+        text = re.sub(r'\x1b\[[0-9;]*m', '', output)
+        return bool(re.search(r'\bxp_cmdshell:1\b', text))
+
     def _run_netexec_module(self, host: str, module: str) -> str:
         """Run a netexec module against a host."""
         cmd = [

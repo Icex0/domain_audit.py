@@ -159,8 +159,9 @@ Checks report what was actually verified: confirmed issues go to `findings/`, ca
   - No other accounts can delegate to AZUREADSSOACC
   - Kerberos decryption key age (30-day renewal recommendation)
 
-**SCCM**
+**SCCM / SCOM**
 - SCCM System Management container detection
+- SCOM management servers (`MSOMHSvc` SPN) and SDK service accounts (`MSOMSdkSvc` SPN)
 
 **Backup**
 - Veeam Backup & Replication server joined to the domain (`VeeamBackupSvc` SPN on a computer or service account, or TCP 9392 open on a Veeam infrastructure host; Veeam advises against joining it to the production domain)
@@ -201,6 +202,9 @@ GPO-based checks take links, enforced links, block inheritance, security filteri
 - SYSVOL: Group Policy Preferences passwords (`cpassword`, decrypted) and autologon passwords (`Registry.xml`)
 - SYSVOL GPP values and GPO logon/startup scripts, and NETLOGON scripts: password keywords and credential command lines (`net use /user:`, `net user <name> <password>`, `-AsPlainText`, `PSCredential`, `schtasks /rp`, `psexec -p`, `sqlcmd -P`, `MapNetworkDrive` with a password), reported with the matching value or line for review
 
+- Shares readable/writable by the current user on all SMB hosts (NetExec `--shares`, ACL-based write check); writable SYSVOL/NETLOGON as a finding
+- MDT/WDS deployment shares (`DeploymentShare$`, `REMINST`): credentials in `Bootstrap.ini`, `CustomSettings.ini` and task sequence `Unattend.xml` (decoded); boot images listed for manual review
+
 **SQL Server**
 - MSSQL server discovery
 - MSSQL sysadmin role detection
@@ -208,7 +212,8 @@ GPO-based checks take links, enforced links, block inheritance, security filteri
 - Linked servers (incl. login mappings) and impersonation
 - Privilege escalation paths to sysadmin for the current user (impersonation chains, db_owner of a TRUSTWORTHY database; NetExec `mssql_priv`, enumeration only)
 - Extended Protection / channel binding not required (NTLM relay to MSSQL); unverifiable when encryption isn't forced
-- Login inventory (`enum_logins`, informational)
+- Login inventory (`enum_logins`, informational) and enabled `sa` login (for manual review)
+- `xp_cmdshell` enabled
 
 ### External Tool Integration
 - **Impacket** - Kerberoasting, AS-REP roasting, SMB/SYSVOL access, LSA user rights, security descriptor parsing

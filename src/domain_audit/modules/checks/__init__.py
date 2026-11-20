@@ -23,6 +23,8 @@ from .trusts import TrustChecker
 from .azure import AzureChecker
 from .sccm import SCCMChecker
 from .veeam import VeeamChecker
+from .scom import SCOMChecker
+from .smb_shares import SMBShareChecker
 from .bloodhound import BloodHoundChecker
 from .sql import SQLChecker
 from .privileged_groups import PrivilegedGroupsChecker
@@ -63,6 +65,7 @@ AVAILABLE_CHECKS = {
     'azure': ('Azure/Entra Connect and AZUREADSSOACC', 'azure_checker', 'run_all_checks'),
     'sccm': ('SCCM/MECM configuration', 'sccm_checker', 'check_sccm'),
     'veeam': ('Veeam Backup & Replication server joined to the domain', 'veeam_checker', 'check_veeam'),
+    'scom': ('SCOM management servers and SDK service accounts', 'scom_checker', 'check_scom'),
     'ldap': ('LDAP anonymous bind, signing and channel binding', 'ldap_checker', 'check_ldap'),
     'sysvol': ('SYSVOL/NETLOGON passwords (GPP cpassword/autologon, keywords)', 'file_share_checker', 'check_shares'),
     'spooler': ('Print Spooler on domain controllers', 'dc_vulns_checker', 'check_printspooler'),
@@ -72,6 +75,7 @@ AVAILABLE_CHECKS = {
     'smb': ('SMB security checks', 'smb_checker', 'check_smb_access'),
     'domain-admin-sessions': ('Domain admin sessions on non-DCs', 'smb_checker', 'check_domain_admin_sessions'),
     'access': ('Access checks (SMB/RDP/WINRM/MSSQL)', 'access_checker', 'check_access'),
+    'smb-shares': ('Shares readable/writable by the current user, credentials on MDT/WDS deployment shares', 'smb_share_checker', 'check_shares'),
     'sql': ('SQL Server enumeration', 'sql_checker', 'check_sql'),
     'wsus': ('WSUS HTTP configuration (MITM vulnerability)', 'wsus_checker', 'check_wsus'),
     'dc-vulns': ('DC vulnerabilities (Zerologon, NoPac)', 'dc_vulns_checker', 'check_dc_vulnerabilities'),
@@ -146,6 +150,7 @@ class SecurityChecker:
         self.azure_checker = AzureChecker(ldap_conn, output_paths)
         self.sccm_checker = SCCMChecker(ldap_conn, output_paths)
         self.veeam_checker = VeeamChecker(ldap_conn, output_paths)
+        self.scom_checker = SCOMChecker(ldap_conn, output_paths)
         self.bloodhound_checker = BloodHoundChecker(ldap_conn, output_paths,
                                                      domain=domain, username=username,
                                                      password=password, hashes=hashes)
@@ -165,6 +170,9 @@ class SecurityChecker:
                                              domain=domain, username=username,
                                              password=password, hashes=hashes,
                                              target_files=self.target_files)
+        self.smb_share_checker = SMBShareChecker(ldap_conn, output_paths, domain=domain,
+                                                 username=username, password=password, hashes=hashes,
+                                                 target_files=self.target_files)
         self.wsus_checker = WSUSChecker(ldap_conn, output_paths,
                                          server=ldap_conn.config.server,
                                          domain=domain, username=username,
@@ -230,6 +238,7 @@ class SecurityChecker:
         self.azure_checker.run_all_checks()
         self.sccm_checker.check_sccm()
         self.veeam_checker.check_veeam()
+        self.scom_checker.check_scom()
         self.wsus_checker.check_wsus()
         
         # Phase 8 checks
@@ -249,6 +258,7 @@ class SecurityChecker:
         # Phase 12 checks
         self.logger.section("SECURITY CHECKS - PART 8")
         self.access_checker.check_access()
+        self.smb_share_checker.check_shares()
         self.sql_checker.check_sql()
         
         # DC vulnerability checks
