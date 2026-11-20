@@ -46,6 +46,9 @@ class SQLChecker:
         linked_servers = []
         impersonate_privs = []
         encryption_disabled = []
+        privesc_paths = []
+        epa_not_required, epa_unverified = [], []
+        logins = []
         
         # Collect all outputs for saving
         all_outputs = []
@@ -78,6 +81,31 @@ class SQLChecker:
                 # Check for encryption disabled (if not already found)
                 if 'EncryptionReq:False' in imp_output and host not in encryption_disabled:
                     encryption_disabled.append(host)
+
+            # Privilege escalation paths to sysadmin (enumeration only, no ACTION=privesc)
+            priv_output = self._run_netexec_module(host, 'mssql_priv')
+            if priv_output:
+                all_outputs += [f"=== {host} - mssql_priv ===", priv_output, ""]
+                path = self._parse_priv_output(priv_output)
+                if path:
+                    privesc_paths.append({'host': host, 'path': path})
+
+            # Extended Protection (channel binding) - NTLM relay to MSSQL
+            cbt_output = self._run_netexec_module(host, 'mssql_cbt')
+            if cbt_output:
+                all_outputs += [f"=== {host} - mssql_cbt ===", cbt_output, ""]
+                state = self._parse_cbt_output(cbt_output)
+                if state == 'not_required':
+                    epa_not_required.append(host)
+                elif state == 'unverified':
+                    epa_unverified.append(host)
+
+            # Login inventory (informational)
+            logins_output = self._run_netexec_module(host, 'enum_logins')
+            if logins_output:
+                all_outputs += [f"=== {host} - enum_logins ===", logins_output, ""]
+                for name, login_type, status in self._parse_logins_output(logins_output):
+                    logins.append(f"{host}: {name} ({login_type}, {status})")
         
         # Save results
         if linked_servers:
@@ -106,6 +134,56 @@ class SQLChecker:
             self.logger.finding(f"Found {len(encryption_disabled)} MSSQL hosts with encryption disabled")
             write_lines(encryption_disabled, self.output_paths['findings'] / 'mssql_encryption_disabled.txt')
         
+        if privesc_paths:
+            self.logger.finding(f"Current user can escalate to sysadmin on {len(privesc_paths)} MSSQL host(s): "
+                                f"{', '.join(p['host'] for p in privesc_paths)}")
+            lines = []
+            for item in privesc_paths:
+                lines.append(f"Host: {item['host']}")
+                lines.extend(f"  - {step}" for step in item['path'])
+                lines.append("")
+            lines += ["Paths found by NetExec mssql_priv (enumeration only; nothing was changed):",
+                      "- 'can impersonate: X (sysadmin)': EXECUTE AS LOGIN = 'X' gives sysadmin rights.",
+                      "- 'can privesc via dbowner': the user is db_owner of a TRUSTWORTHY database owned by a",
+                      "  sysadmin, so code in that database can run as sysadmin.",
+                      "",
+                      "Recommendation: remove IMPERSONATE permissions on privileged logins, set TRUSTWORTHY",
+                      "OFF on user databases and do not let sysadmins own user databases."]
+            write_lines(lines, self.output_paths['findings'] / 'mssql_privesc_sysadmin.txt')
+
+        if epa_not_required:
+            self.logger.finding(f"Extended Protection (channel binding) not required on {len(epa_not_required)} "
+                                f"MSSQL host(s) - NTLM relay to MSSQL possible: {', '.join(epa_not_required)}")
+            write_lines([f"  - {h}" for h in epa_not_required] + [
+                "",
+                "A login without a channel binding token succeeded over TLS (NetExec mssql_cbt), so",
+                "Extended Protection is Off or Allowed. NTLM authentication coerced from a user or",
+                "computer can be relayed to these servers (e.g. ntlmrelayx -t mssql://host) and used",
+                "with that account's SQL permissions.",
+                "",
+                "Recommendation: set Extended Protection to Required and Force Encryption to Yes",
+                "(SQL Server Configuration Manager > Protocols > Advanced / Flags)."],
+                self.output_paths['findings'] / 'mssql_epa_not_required.txt')
+
+        if epa_unverified:
+            self.logger.warning(f"[!] Extended Protection could not be verified on {len(epa_unverified)} MSSQL host(s) "
+                                "(encryption not forced) - check manually")
+            write_lines([f"  - {h}" for h in epa_unverified] + [
+                "",
+                "Force Encryption is off, so channel binding cannot be tested; only service binding",
+                "(Extended Protection = Required) would block NTLM relay on unencrypted connections.",
+                "NetExec reports these as 'Channel Binding Token NOT REQUIRED' without testing it.",
+                "Verify the Extended Protection setting in SQL Server Configuration Manager, or test",
+                "a relay (ntlmrelayx -t mssql://host). Recommendation: Extended Protection Required",
+                "and Force Encryption Yes."],
+                self.output_paths['checks'] / 'mssql_epa_unverified.txt')
+
+        if logins:
+            self.logger.info(f"[*] {len(logins)} SQL Server login(s) visible to the current user (saved to data)")
+            write_lines(["SQL Server logins visible to the current user (NetExec enum_logins). A low-privileged",
+                         "login only sees its own login, sa and logins it has permissions on.", ""] + logins,
+                        self.output_paths['data'] / 'mssql_logins.txt')
+
         # Save all netexec outputs
         if all_outputs:
             write_lines(all_outputs, self.output_paths['data'] / 'mssql_servers.txt')
@@ -283,3 +361,55 @@ class SQLChecker:
             else:
                 in_block = False
         return users
+
+    def _parse_priv_output(self, output: str) -> List[str]:
+        """Parse mssql_priv (enum_priv) output into a privesc path.
+
+        Returns the impersonation steps plus the final step when a path to sysadmin
+        exists ('[+] X can impersonate: Y (sysadmin)', '[+] X can privesc via
+        dbowner', ...), or [] when there is none or the user is already sysadmin.
+        """
+        steps: List[str] = []
+        found = False
+        for status, msg in self._module_messages(output):
+            if re.search(r' can impersonate: .+$', msg) or msg.endswith(' can privesc via dbowner'):
+                steps.append(msg)
+                if status == '+':
+                    found = True
+        return steps if found else []
+
+    @staticmethod
+    def _parse_cbt_output(output: str) -> str:
+        """Classify mssql_cbt output: 'not_required', 'required', 'unverified' or ''.
+
+        The module prints highlight lines without a status marker. Without forced
+        encryption it reports 'NOT REQUIRED' without testing; Extended Protection
+        can then still block relay through service binding, so that is unverified.
+        """
+        text = re.sub(r'\x1b\[[0-9;]*m', '', output)
+        if 'Connection successful: Channel Binding Token NOT REQUIRED' in text:
+            return 'not_required'
+        if 'Channel Binding Token REQUIRED' in text and 'NOT REQUIRED' not in text:
+            return 'required'
+        if 'TLS not required' in text:
+            return 'unverified'
+        return ''
+
+    @staticmethod
+    def _parse_logins_output(output: str) -> List[Tuple[str, str, str]]:
+        """Parse enum_logins rows ('<name> <type> ENABLED|DISABLED') after its header."""
+        rows: List[Tuple[str, str, str]] = []
+        offset = None
+        for line in re.sub(r'\x1b\[[0-9;]*m', '', output).split('\n'):
+            if offset is None:
+                if 'Login Name' in line and 'Status' in line:
+                    offset = line.index('Login Name')
+                continue
+            row = line[offset:].strip()
+            if not row or set(row) <= set('- '):
+                continue
+            match = re.match(r'(.+?)\s+(SQL User|Domain User|Local User|Windows Group|Certificate Login|'
+                             r'Asymmetric Key Login|\S+)\s+(ENABLED|DISABLED)$', row)
+            if match:
+                rows.append((match.group(1).strip(), match.group(2), match.group(3)))
+        return rows

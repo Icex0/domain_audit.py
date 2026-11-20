@@ -206,6 +206,9 @@ GPO-based checks take links, enforced links, block inheritance, security filteri
 - MSSQL sysadmin role detection
 - Encryption configuration
 - Linked servers (incl. login mappings) and impersonation
+- Privilege escalation paths to sysadmin for the current user (impersonation chains, db_owner of a TRUSTWORTHY database; NetExec `mssql_priv`, enumeration only)
+- Extended Protection / channel binding not required (NTLM relay to MSSQL); unverifiable when encryption isn't forced
+- Login inventory (`enum_logins`, informational)
 
 ### External Tool Integration
 - **Impacket** - Kerberoasting, AS-REP roasting, SMB/SYSVOL access, LSA user rights, security descriptor parsing
