@@ -190,7 +190,7 @@ GPO-based checks take links, enforced links, block inheritance, security filteri
 - Domain admin sessions on non-DCs (nested Domain Admins)
 - SMB/WinRM/MSSQL access checks via NetExec; RDP logon access only reported when the installed NetExec confirms the logon
 - RDP NLA disabled detection
-- WebClient service and CVE detection (NetExec `enum_cve`, incl. NTLM reflection)
+- WebClient service (for review, as a precondition for HTTP coercion and relay to LDAP) and CVE detection (NetExec `enum_cve`, incl. NTLM reflection)
 - PrintSpooler on Domain Controllers
 
 **LDAP Security**

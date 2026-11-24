@@ -585,9 +585,22 @@ class NetworkChecker:
                 webclient_hosts = sorted(set(webclient_hosts))
                 
                 if webclient_hosts:
-                    self.logger.finding(f"{len(webclient_hosts)} systems have WebClient service running")
-                    write_lines(webclient_hosts, 
-                               self.output_paths['findings'] / 'computers_webdav.txt')
+                    # Not a vulnerability by itself (default service on workstations, started by
+                    # OneDrive/SharePoint/Nextcloud): it is a precondition for coercing HTTP
+                    # authentication and relaying it to LDAP(S), which the ldap check covers.
+                    self.logger.warning(f"[!] {len(webclient_hosts)} systems have the WebClient service running "
+                                        "(HTTP coercion/relay target, see checks/computers_webdav.txt)")
+                    write_lines(webclient_hosts + [
+                        "",
+                        "The WebClient service is running on these systems. This is not a vulnerability by",
+                        "itself, but it lets an attacker coerce HTTP (WebDAV) authentication from them, which",
+                        "can be relayed to LDAP(S) for RBCD or shadow credentials when LDAP signing or",
+                        "channel binding is not enforced on the domain controllers (see the ldap check), using",
+                        "a DNS record pointing to the attacker (ADIDNS) or an account with an SPN.",
+                        "",
+                        "Report it as part of the relay chain, together with the LDAP signing/channel binding",
+                        "result, rather than as a separate finding."],
+                               self.output_paths['checks'] / 'computers_webdav.txt')
                 else:
                     self.logger.success("[+] No systems have WebClient service running")
                 
