@@ -92,6 +92,9 @@ def main(
     use_ldaps: Annotated[bool, typer.Option("--ldaps", help="Use LDAPS instead of LDAP")] = False,
     include_ip: Annotated[Optional[List[str]], typer.Option("--include-ip", help="Only include IP/CIDR or file of IPs/CIDRs in non-DC host scanning. Can be repeated or comma-separated.")] = None,
     exclude_ip: Annotated[Optional[List[str]], typer.Option("--exclude-ip", help="Exclude IP/CIDR or file of IPs/CIDRs from non-DC host scanning. Can be repeated or comma-separated.")] = None,
+    probe_user: Annotated[Optional[str], typer.Option("--probe-user", help="Second account for the SMB signing bypass check (reauth_swap); must differ from --username")] = None,
+    probe_pass: Annotated[Optional[str], typer.Option("--probe-pass", help="Password of --probe-user")] = None,
+    probe_hash: Annotated[Optional[str], typer.Option("--probe-hash", help="NT hash of --probe-user (instead of --probe-pass)")] = None,
     check: Annotated[Optional[str], typer.Option("--check", "-c", help="Run a specific check instead of full audit")] = None,
     list_checks: Annotated[bool, typer.Option("--list", "-L", help="List available checks")] = False,
     version: Annotated[Optional[bool], typer.Option("--version", callback=_version_callback, is_eager=True, help="Show version and exit")] = None,
@@ -129,7 +132,8 @@ def main(
             check_name=check, domain=domain, server=server, username=username,
             password=password, output=output, verbose=verbose,
             use_ldaps=use_ldaps, bloodhound_options=bloodhound_options,
-            include_ip=include_ip, exclude_ip=exclude_ip
+            include_ip=include_ip, exclude_ip=exclude_ip,
+            probe_user=probe_user, probe_pass=probe_pass, probe_hash=probe_hash
         )
     else:
         _run_audit(
@@ -137,7 +141,8 @@ def main(
             password=password, output=output, verbose=verbose,
             skip_bloodhound=skip_bloodhound, bloodhound_options=bloodhound_options,
             skip_roasting=skip_roasting, use_ldaps=use_ldaps,
-            include_ip=include_ip, exclude_ip=exclude_ip
+            include_ip=include_ip, exclude_ip=exclude_ip,
+            probe_user=probe_user, probe_pass=probe_pass, probe_hash=probe_hash
         )
 
 
@@ -147,7 +152,10 @@ def _run_check(
     output: Optional[Path] = None, verbose: bool = False,
     use_ldaps: bool = False, bloodhound_options: str = "all",
     include_ip: Optional[List[str]] = None,
-    exclude_ip: Optional[List[str]] = None
+    exclude_ip: Optional[List[str]] = None,
+    probe_user: Optional[str] = None,
+    probe_pass: Optional[str] = None,
+    probe_hash: Optional[str] = None
 ):
     """Internal function to run a specific check."""
     logger = get_logger(verbose)
@@ -214,7 +222,8 @@ def _run_check(
                 username=username,
                 password=password,
                 bloodhound_options=bloodhound_options,
-                target_scope=target_scope
+                target_scope=target_scope,
+                probe_user=probe_user, probe_password=probe_pass, probe_hash=probe_hash
             )
             checker.run_check(check_name, bloodhound_options=bloodhound_options)
             
@@ -239,7 +248,10 @@ def _run_audit(
     skip_bloodhound: bool = False, bloodhound_options: str = "all",
     skip_roasting: bool = False, use_ldaps: bool = False,
     include_ip: Optional[List[str]] = None,
-    exclude_ip: Optional[List[str]] = None
+    exclude_ip: Optional[List[str]] = None,
+    probe_user: Optional[str] = None,
+    probe_pass: Optional[str] = None,
+    probe_hash: Optional[str] = None
 ):
     """Internal function to run the audit."""
     set_verbose(verbose)
@@ -342,7 +354,8 @@ def _run_audit(
                 bloodhound_options=bloodhound_options,
                 skip_bloodhound=skip_bloodhound,
                 skip_roasting=skip_roasting,
-                target_scope=target_scope
+                target_scope=target_scope,
+                probe_user=probe_user, probe_password=probe_pass, probe_hash=probe_hash
             )
             checker.run_all_checks()
             

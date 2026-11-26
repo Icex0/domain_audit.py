@@ -70,6 +70,9 @@ domain-audit -L
 
 # Run specific check
 domain-audit --check adcs -d contoso.com -dc 10.0.0.1 -u domainuser -p 'Password123!'
+
+# Include the SMB signing bypass test (needs a second, different account)
+domain-audit -d contoso.com -dc 10.0.0.1 -u domainuser -p 'Password123!' --probe-user domainuser2 --probe-pass 'Password456!'
 ```
 
 ## What It Does
@@ -186,6 +189,7 @@ GPO-based checks take links, enforced links, block inheritance, security filteri
 - IP resolution and /24 range calculation
 - Port scanning (SMB, WinRM, RDP, MSSQL, HTTP)
 - SMB signing enforcement and SMBv1 detection
+- Enforced SMB signing bypass via cross-user re-authentication (NetExec `reauth_swap`, live test; optional, needs a second account: `--probe-user` with `--probe-pass` or `--probe-hash`)
 - SMB null session (only when shares, users or the password policy can be enumerated) and guest access
 - Domain admin sessions on non-DCs (nested Domain Admins)
 - SMB/WinRM/MSSQL access checks via NetExec; RDP logon access only reported when the installed NetExec confirms the logon

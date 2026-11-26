@@ -25,6 +25,7 @@ from .sccm import SCCMChecker
 from .veeam import VeeamChecker
 from .scom import SCOMChecker
 from .smb_shares import SMBShareChecker
+from .smb_reauth import SMBReauthChecker
 from .bloodhound import BloodHoundChecker
 from .sql import SQLChecker
 from .privileged_groups import PrivilegedGroupsChecker
@@ -73,6 +74,7 @@ AVAILABLE_CHECKS = {
     'network': ('Network enumeration', 'network_checker', 'check_network'),
     'cve': ('CVE / NTLM reflection + WebClient (netexec enum_cve)', 'network_checker', 'check_webclient_cve'),
     'smb': ('SMB security checks', 'smb_checker', 'check_smb_access'),
+    'smb-reauth': ('Enforced SMB signing bypass via cross-user re-auth (reauth_swap; needs --probe-user)', 'smb_reauth_checker', 'check_reauth_swap'),
     'domain-admin-sessions': ('Domain admin sessions on non-DCs', 'smb_checker', 'check_domain_admin_sessions'),
     'access': ('Access checks (SMB/RDP/WINRM/MSSQL)', 'access_checker', 'check_access'),
     'smb-shares': ('Shares readable/writable by the current user, credentials on MDT/WDS deployment shares', 'smb_share_checker', 'check_shares'),
@@ -91,7 +93,8 @@ class SecurityChecker:
                  domain: str = None, username: str = None, password: str = None,
                  hashes: str = None, bloodhound_options: str = "all",
                  skip_bloodhound: bool = False, skip_roasting: bool = False,
-                 target_scope: TargetScope = None):
+                 target_scope: TargetScope = None, probe_user: str = None,
+                 probe_password: str = None, probe_hash: str = None):
         self.ldap = ldap_conn
         self.output_paths = output_paths
         self.logger = get_logger()
@@ -170,6 +173,10 @@ class SecurityChecker:
                                              domain=domain, username=username,
                                              password=password, hashes=hashes,
                                              target_files=self.target_files)
+        self.smb_reauth_checker = SMBReauthChecker(ldap_conn, output_paths, domain=domain,
+                                                   username=username, password=password, hashes=hashes,
+                                                   probe_user=probe_user, probe_password=probe_password,
+                                                   probe_hash=probe_hash, target_files=self.target_files)
         self.smb_share_checker = SMBShareChecker(ldap_conn, output_paths, domain=domain,
                                                  username=username, password=password, hashes=hashes,
                                                  target_files=self.target_files)
@@ -254,6 +261,7 @@ class SecurityChecker:
         # SMB access checks (runs after network scan identifies SMB hosts)
         self.smb_checker.check_smb_access()
         self.smb_checker.check_domain_admin_sessions()
+        self.smb_reauth_checker.check_reauth_swap()
         
         # Phase 12 checks
         self.logger.section("SECURITY CHECKS - PART 8")
